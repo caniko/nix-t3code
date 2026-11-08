@@ -1,0 +1,73 @@
+# nix-t3code
+
+A Home Manager module for [T3 Code](https://github.com/pingdotgg/t3code) with
+finer control than Home Manager's built-in `programs.t3code`, which it replaces
+(`disabledModules`). Option names stay compatible with the built-in module.
+
+```nix
+{
+  inputs.nix-t3code.url = "github:caniko/nix-t3code";
+
+  # in a Home Manager configuration
+  imports = [ inputs.nix-t3code.homeManagerModules.default ];
+
+  programs.t3code = {
+    enable = true;
+    baseDir = "${config.xdg.dataHome}/t3code";
+    userSettings.enableProviderUpdateChecks = false;
+    userSettingsDefaults.providerInstances.opencode = {
+      driver = "opencode";
+      enabled = true;
+    };
+    server = {
+      enable = true;
+      host = "127.0.0.1";
+      port = 3774;
+    };
+    sourceControl = {
+      gitCredentialHelpers = true;
+      hosts = {
+        "github.com".kind = "github";
+        "gitlab.com".kind = "gitlab";
+        "codeberg.org".kind = "forgejo";
+        "codefloe.com".kind = "forgejo";
+      };
+    };
+  };
+}
+```
+
+## What it adds
+
+- **Any T3 home.** `baseDir` replaces the hardcoded `~/.t3` and is exported as
+  `T3CODE_HOME`, so the desktop app, CLI and service agree.
+- **Every settings file.** `settings.json`, `keybindings.json`,
+  `client-settings.json` and `desktop-settings.json`, each with enforced keys
+  (`userSettings`, ...) and seeded keys (`userSettingsDefaults`, ...) that keep
+  later changes made in the app. The files stay regular, writable files: the
+  server rewrites `settings.json` and `keybindings.json` itself, so links into
+  the store break it. `mutable* = false` resets a file to the declaration on
+  every activation instead.
+- **Environment themes.** `themes.<id>` publishes theme files to
+  `userdata/themes`, which the server hot-reloads and offers to all clients.
+  `defaultTheme` makes connected clients adopt one, again whenever it changes.
+  [nix-theme-broker](https://github.com/caniko/nix-theme-broker)'s `t3code`
+  target fills both from the broker palette.
+- **Forges.** `sourceControl.hosts` installs `gh`, `glab` and `fj` for the
+  declared hosts and can make Git authenticate HTTPS with their logins. T3 Code
+  recognizes hosts it does not know by name, such as `codefloe.com`, only
+  through such a CLI login.
+- **Service tuning.** `server.{host,port,extraArgs,path,environment,environmentFile,serviceConfig}`.
+
+The server unit is Linux-only.
+
+## Checks
+
+```console
+nix flake check
+```
+
+The contribution workflow follows Home Manager's
+[contributing guide](https://nix-community.github.io/home-manager/#ch-contributing):
+the module keeps upstream option names, documents every option, and ships a
+test for its behaviour.
