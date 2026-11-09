@@ -66,10 +66,13 @@ let
       )
     );
 
-  effectiveUserSettings = lib.recursiveUpdate (lib.optionalAttrs (cfg.defaultTheme != null) {
-    defaultTheme = cfg.defaultTheme;
-    inherit defaultThemeSetAt;
-  }) cfg.userSettings;
+  effectiveUserSettings = lib.recursiveUpdate (
+    lib.optionalAttrs (cfg.defaultTheme != null) {
+      defaultTheme = cfg.defaultTheme;
+      inherit defaultThemeSetAt;
+    }
+    // lib.optionalAttrs (cfg.linkedEnvironments != { }) { linkedEnvironmentsEnabled = true; }
+  ) cfg.userSettings;
 
   effectiveUserSettingsDefaults = lib.recursiveUpdate (lib.optionalAttrs (githubAccounts != { }) {
     sourceControlHosts.github.hosts = githubAccounts;
@@ -179,6 +182,82 @@ let
     (toString cfg.server.port)
   ]
   ++ cfg.server.extraArgs;
+
+  tunnelUnit = name: "t3code-tunnel-${name}";
+  linkPeers = jsonFormat.generate "t3code-linked-environments.json" (
+    lib.mapAttrsToList (_: peer: {
+      url = "http://127.0.0.1:${toString peer.localPort}";
+      destination = peer.sshHost;
+      # Run by the peer's login shell; single quotes read the same in POSIX shells and Nushell.
+      pairing = "${peer.command} auth pairing create --json --ttl 5m --base-dir ${lib.escapeShellArg peer.baseDir}";
+      inherit (peer) access;
+    }) cfg.linkedEnvironments
+  );
+  linkEnvironments = pkgs.writeShellApplication {
+    name = "t3code-link-environments";
+    runtimeInputs = [
+      cfg.package
+      pkgs.coreutils
+      pkgs.jq
+      pkgs.openssh
+    ];
+    text = builtins.readFile ./link-environments.sh;
+  };
+  localPorts = lib.mapAttrsToList (_: peer: peer.localPort) cfg.linkedEnvironments;
+
+  linkModule = {
+    options = {
+      sshHost = mkOption {
+        type = types.str;
+        example = "alice@workstation";
+        description = ''
+          SSH destination of the peer machine, as the same user. Login must
+          work without a prompt (a key or agent), because a user service
+          holds the tunnel.
+        '';
+      };
+
+      port = mkOption {
+        type = types.port;
+        example = 3773;
+        description = "Port the peer's T3 Code server listens on, on its loopback.";
+      };
+
+      localPort = mkOption {
+        type = types.port;
+        example = 37731;
+        description = ''
+          Loopback port here that the tunnel forwards to the peer's server. The
+          link is made to `http://127.0.0.1:<localPort>`, so keep it stable.
+        '';
+      };
+
+      baseDir = mkOption {
+        type = types.strMatching "[^']+";
+        default = cfg.baseDir;
+        defaultText = literalExpression "config.programs.t3code.baseDir";
+        description = "The peer's T3 Code base directory.";
+      };
+
+      command = mkOption {
+        type = types.str;
+        default = "t3";
+        description = "How the peer's login shell runs the T3 Code CLI.";
+      };
+
+      access = mkOption {
+        type = types.enum [
+          "read-only"
+          "approval-required"
+          "auto-accept-edits"
+          "auto"
+          "full-access"
+        ];
+        default = "approval-required";
+        description = "What agents here may do on the peer: read-only, or the broadest runtime mode.";
+      };
+    };
+  };
 
   hostModule =
     { name, ... }:
@@ -474,6 +553,29 @@ in
       forgejoPackage = lib.mkPackageOption pkgs "forgejo-cli" { };
     };
 
+    linkedEnvironments = mkOption {
+      type = types.attrsOf (types.submodule linkModule);
+      default = { };
+      example = literalExpression ''
+        {
+          workstation = {
+            sshHost = "alice@workstation";
+            port = 3773;
+            localPort = 37731;
+          };
+        }
+      '';
+      description = ''
+        Other T3 Code environments to link this one to, so agents here can work
+        there. Each peer gets an SSH tunnel user service from a loopback port
+        here to its server, and {file}`t3code-link.timer` pairs over SSH and
+        runs {command}`t3 environment link` whenever a link is missing or
+        expires within a week. The peer lists the link under Settings →
+        Connections, where it can be revoked. Sets
+        `linkedEnvironmentsEnabled`; the peer needs it too.
+      '';
+    };
+
     server = {
       enable = lib.mkEnableOption "the T3 Code server as a user service";
 
@@ -693,16 +795,100 @@ in
 
         Service = {
           ExecStart = "${lib.getExe' cfg.package "t3"} ${lib.escapeShellArgs serverArgs}";
-          Environment = lib.mapAttrsToList (name: value: "${name}=${value}") cfg.server.environment;
           Restart = "on-failure";
           RestartSec = 5;
         }
         // lib.optionalAttrs (cfg.server.environmentFile != null) {
           EnvironmentFile = toString cfg.server.environmentFile;
         }
-        // cfg.server.serviceConfig;
+        // cfg.server.serviceConfig
+        // {
+          # Raw entries come last, so they win per variable without dropping the others.
+          Environment =
+            lib.mapAttrsToList (name: value: "${name}=${value}") cfg.server.environment
+            ++ lib.toList (cfg.server.serviceConfig.Environment or [ ]);
+        };
 
         Install.WantedBy = [ "default.target" ];
+      };
+    })
+
+    (mkIf (cfg.linkedEnvironments != { }) {
+      assertions = [
+        {
+          assertion = cfg.package != null && pkgs.stdenv.hostPlatform.isLinux;
+          message = "programs.t3code.linkedEnvironments requires programs.t3code.package and Linux (systemd).";
+        }
+        {
+          assertion =
+            lib.allUnique localPorts
+            && !(builtins.elem cfg.server.port localPorts)
+            && builtins.all (name: builtins.match "[A-Za-z0-9_-]+" name != null) (
+              builtins.attrNames cfg.linkedEnvironments
+            );
+          message = "programs.t3code.linkedEnvironments: names must match [A-Za-z0-9_-]+ and local ports must be unique and differ from server.port.";
+        }
+      ];
+
+      systemd.user.services =
+        lib.mapAttrs' (
+          name: peer:
+          lib.nameValuePair (tunnelUnit name) {
+            Unit = {
+              Description = "SSH tunnel to the ${name} T3 Code environment";
+              After = [ "network.target" ];
+              # A peer that is off keeps retrying instead of giving up.
+              StartLimitIntervalSec = 0;
+            };
+            Service = {
+              ExecStart = lib.escapeShellArgs [
+                (lib.getExe pkgs.openssh)
+                "-N"
+                "-o"
+                "BatchMode=yes"
+                "-o"
+                "ExitOnForwardFailure=yes"
+                "-o"
+                "ServerAliveInterval=30"
+                "-o"
+                "ServerAliveCountMax=3"
+                "-L"
+                "127.0.0.1:${toString peer.localPort}:127.0.0.1:${toString peer.port}"
+                peer.sshHost
+              ];
+              Restart = "always";
+              RestartSec = 60;
+            };
+            Install.WantedBy = [ "default.target" ];
+          }
+        ) cfg.linkedEnvironments
+        // {
+          t3code-link =
+            let
+              tunnels = map (name: "${tunnelUnit name}.service") (builtins.attrNames cfg.linkedEnvironments);
+            in
+            {
+              Unit = {
+                Description = "Link T3 Code to its peer environments";
+                Wants = tunnels;
+                After = tunnels ++ lib.optional cfg.server.enable "t3code.service";
+              };
+              Service = {
+                Type = "oneshot";
+                ExecStart = "${lib.getExe linkEnvironments} ${linkPeers}";
+                Environment = [ "T3CODE_HOME=${cfg.baseDir}" ];
+                TimeoutStartSec = "5min";
+              };
+            };
+        };
+
+      systemd.user.timers.t3code-link = {
+        Unit.Description = "Keep T3 Code's peer environment links fresh";
+        Timer = {
+          OnStartupSec = "2min";
+          OnUnitActiveSec = "6h";
+        };
+        Install.WantedBy = [ "timers.target" ];
       };
     })
   ]);

@@ -63,7 +63,16 @@ let
               enable = true;
               host = "127.0.0.1";
               port = 3774;
-              serviceConfig.Slice = "app.slice";
+              environment.T3CODE_LOG_LEVEL = "Debug";
+              serviceConfig = {
+                Slice = "app.slice";
+                Environment = [ "EXTRA=1" ];
+              };
+            };
+            linkedEnvironments.peer = {
+              sshHost = "tester@peer";
+              port = 3774;
+              localPort = 37741;
             };
           };
         }
@@ -104,8 +113,15 @@ assert lib.assertMsg
   ))
   "unexpected ExecStart: ${toString service.ExecStart}";
 assert lib.assertMsg (toString service.Slice == "app.slice") "serviceConfig not merged";
-assert lib.assertMsg (builtins.elem "T3CODE_HOME=${home}/.t3" service.Environment)
-  "T3CODE_HOME missing";
+assert lib.assertMsg (lib.all (entry: builtins.elem entry service.Environment) [
+  "T3CODE_HOME=${home}/.t3"
+  "T3CODE_LOG_LEVEL=Debug"
+  "EXTRA=1"
+]) "server.environment and raw serviceConfig.Environment must both reach the unit";
+assert lib.assertMsg (lib.hasInfix "-L 127.0.0.1:37741:127.0.0.1:3774 tester@peer" (
+  toString first.systemd.user.services.t3code-tunnel-peer.Service.ExecStart
+)) "tunnel unit missing";
+assert lib.assertMsg (first.systemd.user.timers ? t3code-link) "link timer missing";
 assert lib.assertMsg (lib.hasInfix "glab auth git-credential" (
   lib.last (helpers "gitlab.com")
 )) "glab helper missing";
@@ -154,6 +170,7 @@ assert lib.assertMsg (lib.hasInfix "gh auth git-credential" (
         s="$state/settings.json"
         jq -e '.enableProviderUpdateChecks == false and .nested == {"a": 1, "b": 2} and .seeded == "app" and .keep == 1' "$s"
         jq -e '.providerInstances.opencode.enabled and .defaultTheme == "broker" and (.defaultThemeSetAt | startswith("nix-"))' "$s"
+        jq -e '.linkedEnvironmentsEnabled' "$s"
         [[ $(stat -c %a "$s") == 600 ]]
         jq -e '. == {"fontSizeCode": 15, "timestampFormat": "24-hour"}' "$state/client-settings.json"
         jq -e 'map([.key, .command]) == [["mod+k", "y"], ["mod+j", "terminal.toggle"]]' "$state/keybindings.json"
@@ -192,6 +209,58 @@ assert lib.assertMsg (lib.hasInfix "gh auth git-credential" (
           [[ $(cat "$root/linked.json") == "$broken" ]]
         done
 
+        touch "$out"
+      '';
+
+  link-environments =
+    pkgs.runCommand "t3code-link-environments-test"
+      {
+        nativeBuildInputs = [ pkgs.jq ];
+      }
+      ''
+        set -euo pipefail
+        mkdir bin
+        export PATH="$PWD/bin:$PATH" LOG="$PWD/log" LINKS="$PWD/links.json" T3CODE_HOME="$PWD/base"
+        cat > bin/t3 <<'EOF'
+        #!/bin/sh
+        case "$1 $2" in
+          "environment list") cat "$LINKS" ;;
+          "environment link") echo "link $3 $(cat)" >> "$LOG" ;;
+        esac
+        EOF
+        # Exit 255 (unreachable) for "down", a failed pairing for "bad".
+        cat > bin/ssh <<'EOF'
+        #!/bin/sh
+        destination="$5"
+        echo "ssh $destination $6" >> "$LOG"
+        case "$destination" in
+          down) exit 255 ;;
+          bad) exit 1 ;;
+        esac
+        echo "{\"credential\": \"code-$destination\"}"
+        EOF
+        chmod +x bin/*
+        expires() { date -u -d "$1" +%Y-%m-%dT%H:%M:%S.000Z; }
+        cat > links.json <<EOF
+        [
+          {"urls": ["http://127.0.0.1:1"], "status": "reachable", "expiresAt": "$(expires '+30 days')"},
+          {"urls": ["http://127.0.0.1:2"], "status": "reachable", "expiresAt": "$(expires '+2 days')"}
+        ]
+        EOF
+        peer() { echo "{\"url\": \"http://127.0.0.1:$1\", \"destination\": \"$2\", \"pairing\": \"t3 auth pairing create --base-dir '/b'\", \"access\": \"read-only\"}"; }
+        echo "[$(peer 1 fresh), $(peer 2 soon), $(peer 3 down), $(peer 4 ok), $(peer 5 bad)]" > peers.json
+
+        set +e
+        bash -euo pipefail ${../modules/link-environments.sh} peers.json
+        status=$?
+        set -e
+        # A failed pairing fails the run; an unreachable peer does not.
+        [[ $status == 1 ]]
+        grep -qx "link http://127.0.0.1:2 code-soon" log
+        grep -qx "link http://127.0.0.1:4 code-ok" log
+        [[ $(grep -c '^link ' log) == 2 ]]
+        if grep -q ' fresh ' log; then exit 1; fi
+        grep -qx "ssh ok t3 auth pairing create --base-dir '/b' --label '$(id -un)@$(uname -n)'" log
         touch "$out"
       '';
 }

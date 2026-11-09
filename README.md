@@ -58,6 +58,10 @@ finer control than Home Manager's built-in `programs.t3code`, which it replaces
   recognizes hosts it does not know by name, such as `codefloe.com`, only
   through such a CLI login.
 - **Service tuning.** `server.{host,port,extraArgs,path,environment,environmentFile,serviceConfig}`.
+- **Linked environments.** `linkedEnvironments.<name>` links this environment
+  to another machine's T3 Code server through an SSH tunnel to a loopback
+  port, so no server needs a public address. A timer pairs over SSH and renews
+  each link before it expires.
 
 The server unit is Linux-only.
 
