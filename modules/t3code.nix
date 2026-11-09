@@ -852,6 +852,11 @@ in
                 "ServerAliveInterval=30"
                 "-o"
                 "ServerAliveCountMax=3"
+                # A multiplexed client hands the forward to its master and exits at once.
+                "-o"
+                "ControlMaster=no"
+                "-o"
+                "ControlPath=none"
                 "-L"
                 "127.0.0.1:${toString peer.localPort}:127.0.0.1:${toString peer.port}"
                 peer.sshHost

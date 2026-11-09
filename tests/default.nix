@@ -121,6 +121,9 @@ assert lib.assertMsg (lib.all (entry: builtins.elem entry service.Environment) [
 assert lib.assertMsg (lib.hasInfix "-L 127.0.0.1:37741:127.0.0.1:3774 tester@peer" (
   toString first.systemd.user.services.t3code-tunnel-peer.Service.ExecStart
 )) "tunnel unit missing";
+assert lib.assertMsg (lib.hasInfix "ControlPath=none" (
+  toString first.systemd.user.services.t3code-tunnel-peer.Service.ExecStart
+)) "tunnel must not reuse an SSH control master";
 assert lib.assertMsg (first.systemd.user.timers ? t3code-link) "link timer missing";
 assert lib.assertMsg (lib.hasInfix "glab auth git-credential" (
   lib.last (helpers "gitlab.com")
