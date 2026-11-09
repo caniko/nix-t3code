@@ -57,7 +57,7 @@ tunnels with a renewal timer, and keep those tunnels off SSH control masters.
 
 ## Place in the fleet
 
-canix wires it for desktop and service use (`home/modules/desktop/t3code.nix`,
-`root/modules/services/t3code.nix`) and documents it in
+canix wires it for the per-user Home Manager service
+(`home/modules/desktop/t3code.nix`) and documents it in
 `docs/src/operations/t3code.md`; `nix-theme-broker`'s `t3code` target fills
 `themes` and `defaultTheme` from the broker palette.
