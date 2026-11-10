@@ -70,7 +70,10 @@ let
               };
             };
             linkedEnvironments.peer = {
-              sshHost = "tester@peer";
+              sshHost = [
+                "tester@lan"
+                "tester@peer"
+              ];
               port = 3774;
               localPort = 37741;
             };
@@ -104,6 +107,7 @@ let
 
   activation = config: pkgs.writeText "t3code-activation" config.home.activation.t3codeConfig.data;
   service = first.systemd.user.services.t3code.Service;
+  tunnel = toString first.systemd.user.services.t3code-tunnel-peer.Service.ExecStart;
   credential = first.programs.git.settings.credential;
   helpers = host: credential."https://${host}".helper;
 in
@@ -118,12 +122,10 @@ assert lib.assertMsg (lib.all (entry: builtins.elem entry service.Environment) [
   "T3CODE_LOG_LEVEL=Debug"
   "EXTRA=1"
 ]) "server.environment and raw serviceConfig.Environment must both reach the unit";
-assert lib.assertMsg (lib.hasInfix "-L 127.0.0.1:37741:127.0.0.1:3774 tester@peer" (
-  toString first.systemd.user.services.t3code-tunnel-peer.Service.ExecStart
-)) "tunnel unit missing";
-assert lib.assertMsg (lib.hasInfix "ControlPath=none" (
-  toString first.systemd.user.services.t3code-tunnel-peer.Service.ExecStart
-)) "tunnel must not reuse an SSH control master";
+assert lib.assertMsg (lib.hasSuffix
+  "-t3code-tunnel 127.0.0.1:37741:127.0.0.1:3774 tester@lan tester@peer"
+  tunnel
+) "tunnel unit missing";
 assert lib.assertMsg (first.systemd.user.timers ? t3code-link) "link timer missing";
 assert lib.assertMsg (lib.hasInfix "glab auth git-credential" (
   lib.last (helpers "gitlab.com")
@@ -222,6 +224,8 @@ assert lib.assertMsg (lib.hasInfix "gh auth git-credential" (
       }
       ''
         set -euo pipefail
+        # The tunnel must not reuse an SSH control master.
+        grep -q ControlPath=none ${lib.head (lib.splitString " " tunnel)}
         mkdir bin
         export PATH="$PWD/bin:$PATH" LOG="$PWD/log" LINKS="$PWD/links.json" T3CODE_HOME="$PWD/base"
         cat > bin/t3 <<'EOF'
@@ -250,7 +254,7 @@ assert lib.assertMsg (lib.hasInfix "gh auth git-credential" (
           {"urls": ["http://127.0.0.1:2"], "status": "reachable", "expiresAt": "$(expires '+2 days')"}
         ]
         EOF
-        peer() { echo "{\"url\": \"http://127.0.0.1:$1\", \"destination\": \"$2\", \"pairing\": \"t3 auth pairing create --base-dir '/b'\", \"access\": \"read-only\"}"; }
+        peer() { echo "{\"url\": \"http://127.0.0.1:$1\", \"destinations\": [\"down\", \"$2\"], \"pairing\": \"t3 auth pairing create --base-dir '/b'\", \"access\": \"read-only\"}"; }
         echo "[$(peer 1 fresh), $(peer 2 soon), $(peer 3 down), $(peer 4 ok), $(peer 5 bad)]" > peers.json
 
         set +e
@@ -263,6 +267,8 @@ assert lib.assertMsg (lib.hasInfix "gh auth git-credential" (
         grep -qx "link http://127.0.0.1:4 code-ok" log
         [[ $(grep -c '^link ' log) == 2 ]]
         if grep -q ' fresh ' log; then exit 1; fi
+        # Every peer is tried through the dead route first, then the next one.
+        [[ $(grep -c '^ssh down ' log) == 5 ]]
         grep -qx "ssh ok t3 auth pairing create --base-dir '/b' --label '$(id -un)@$(uname -n)'" log
         touch "$out"
       '';

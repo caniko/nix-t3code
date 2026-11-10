@@ -187,7 +187,7 @@ let
   linkPeers = jsonFormat.generate "t3code-linked-environments.json" (
     lib.mapAttrsToList (_: peer: {
       url = "http://127.0.0.1:${toString peer.localPort}";
-      destination = peer.sshHost;
+      destinations = peer.sshHost;
       # Run by the peer's login shell; single quotes read the same in POSIX shells and Nushell.
       pairing = "${peer.command} auth pairing create --json --ttl 5m --base-dir ${lib.escapeShellArg peer.baseDir}";
       inherit (peer) access;
@@ -203,17 +203,34 @@ let
     ];
     text = builtins.readFile ./link-environments.sh;
   };
+  # Holds the forward ($1) through each SSH destination in turn; the unit
+  # restarts from the first one when all have failed or dropped.
+  tunnel = pkgs.writeShellScript "t3code-tunnel" ''
+    forward="$1"
+    shift
+    for destination; do
+      # A multiplexed client hands the forward to its master and exits at once.
+      ${lib.getExe pkgs.openssh} -N -o BatchMode=yes -o ConnectTimeout=10 \
+        -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+        -o ControlMaster=no -o ControlPath=none -L "$forward" "$destination" || true
+    done
+    exit 1
+  '';
   localPorts = lib.mapAttrsToList (_: peer: peer.localPort) cfg.linkedEnvironments;
 
   linkModule = {
     options = {
       sshHost = mkOption {
-        type = types.str;
-        example = "alice@workstation";
+        type = types.coercedTo types.str lib.singleton (types.nonEmptyListOf types.str);
+        example = [
+          "alice@workstation.lan"
+          "alice@workstation.vpn"
+        ];
         description = ''
-          SSH destination of the peer machine, as the same user. Login must
-          work without a prompt (a key or agent), because a user service
-          holds the tunnel.
+          SSH destination of the peer machine, as the same user, or a list of
+          routes to it tried in order (LAN first, then VPN). Login must work
+          without a prompt (a key or agent), because a user service holds the
+          tunnel.
         '';
       };
 
@@ -841,26 +858,13 @@ in
               StartLimitIntervalSec = 0;
             };
             Service = {
-              ExecStart = lib.escapeShellArgs [
-                (lib.getExe pkgs.openssh)
-                "-N"
-                "-o"
-                "BatchMode=yes"
-                "-o"
-                "ExitOnForwardFailure=yes"
-                "-o"
-                "ServerAliveInterval=30"
-                "-o"
-                "ServerAliveCountMax=3"
-                # A multiplexed client hands the forward to its master and exits at once.
-                "-o"
-                "ControlMaster=no"
-                "-o"
-                "ControlPath=none"
-                "-L"
-                "127.0.0.1:${toString peer.localPort}:127.0.0.1:${toString peer.port}"
-                peer.sshHost
-              ];
+              ExecStart = lib.escapeShellArgs (
+                [
+                  tunnel
+                  "127.0.0.1:${toString peer.localPort}:127.0.0.1:${toString peer.port}"
+                ]
+                ++ peer.sshHost
+              );
               Restart = "always";
               RestartSec = 60;
             };

@@ -60,8 +60,9 @@ finer control than Home Manager's built-in `programs.t3code`, which it replaces
 - **Service tuning.** `server.{host,port,extraArgs,path,environment,environmentFile,serviceConfig}`.
 - **Linked environments.** `linkedEnvironments.<name>` links this environment
   to another machine's T3 Code server through an SSH tunnel to a loopback
-  port, so no server needs a public address. A timer pairs over SSH and renews
-  each link before it expires.
+  port, so no server needs a public address. `sshHost` takes one destination
+  or a list of routes tried in order (LAN, then VPN). A timer pairs over SSH
+  and renews each link before it expires.
 
 The server unit is Linux-only.
 
