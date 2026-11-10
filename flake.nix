@@ -1,5 +1,5 @@
 {
-  description = "Home Manager module for fine-grained T3 Code configuration";
+  description = "Home Manager and NixOS modules for T3 Code";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -28,11 +28,14 @@
         t3code = ./modules/t3code.nix;
       };
 
+      nixosModules.t3codeServer = ./modules/server.nix;
+
       checks = forAllSystems (
         pkgs:
         import ./tests {
           inherit pkgs home-manager;
           module = self.homeManagerModules.t3code;
+          serverModule = self.nixosModules.t3codeServer;
         }
       );
 
