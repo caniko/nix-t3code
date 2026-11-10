@@ -203,6 +203,15 @@ let
     ];
     text = builtins.readFile ./link-environments.sh;
   };
+  connectDesktop = pkgs.writeShellApplication {
+    name = "t3code-connect-desktop";
+    runtimeInputs = [
+      cfg.package
+      pkgs.coreutils
+      pkgs.jq
+    ];
+    text = builtins.readFile ./connect-desktop.sh;
+  };
   # Holds the forward ($1) through each SSH destination in turn; the unit
   # restarts from the first one when all have failed or dropped.
   tunnel = pkgs.writeShellScript "t3code-tunnel" ''
@@ -610,6 +619,21 @@ in
         description = "Port the server listens on. `null` keeps T3 Code's default (the first free port from 3773).";
       };
 
+      desktopProgram = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "t3code-desktop";
+        description = ''
+          The desktop app's program in {option}`programs.t3code.package`. When
+          set, {file}`t3code-desktop-connect.service` saves this server in the
+          app's connections, so an app with `localEnvironmentEnabled = false`
+          finds it without pairing by hand. The app must support
+          {command}`--import-connections`, and only takes the import while it
+          is not running; the unit retries hourly. Needs
+          {option}`programs.t3code.server.port`.
+        '';
+      };
+
       extraArgs = mkOption {
         type = types.listOf types.str;
         default = [ ];
@@ -827,6 +851,45 @@ in
         };
 
         Install.WantedBy = [ "default.target" ];
+      };
+    })
+
+    (mkIf (cfg.server.enable && cfg.server.desktopProgram != null) {
+      assertions = [
+        {
+          assertion = cfg.server.port != null;
+          message = "programs.t3code.server.desktopProgram requires programs.t3code.server.port.";
+        }
+      ];
+
+      systemd.user.services.t3code-desktop-connect = {
+        Unit = {
+          Description = "Save the T3 Code server in the desktop app's connections";
+          After = [
+            "t3code.service"
+            "graphical-session.target"
+          ];
+        };
+        Service = {
+          Type = "oneshot";
+          ExecStart = lib.escapeShellArgs [
+            (lib.getExe connectDesktop)
+            (lib.getExe' cfg.package cfg.server.desktopProgram)
+            "http://${
+              if cfg.server.host == null || cfg.server.host == "0.0.0.0" then "127.0.0.1" else cfg.server.host
+            }:${toString cfg.server.port}"
+          ];
+          Environment = [ "T3CODE_HOME=${cfg.baseDir}" ];
+          TimeoutStartSec = "3min";
+        };
+        # The app's keyring and display only exist in a graphical session.
+        Install.WantedBy = [ "graphical-session.target" ];
+      };
+
+      systemd.user.timers.t3code-desktop-connect = {
+        Unit.Description = "Keep the desktop app's T3 Code server connection fresh";
+        Timer.OnUnitActiveSec = "1h";
+        Install.WantedBy = [ "graphical-session.target" ];
       };
     })
 

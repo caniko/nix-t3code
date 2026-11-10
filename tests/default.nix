@@ -169,6 +169,14 @@ assert lib.assertMsg
   (lib.hasSuffix "-t3code-tunnel 127.0.0.1:37741:127.0.0.1:3774 tester@lan tester@peer" tunnel)
   "tunnel unit missing";
 assert lib.assertMsg (first.systemd.user.timers ? t3code-link) "link timer missing";
+assert lib.assertMsg (
+  !(first.systemd.user.services ? t3code-desktop-connect)
+) "desktop connection must be opt-in";
+assert lib.assertMsg (lib.hasSuffix "/bin/desktop http://127.0.0.1:3774" (
+  toString
+    (configuration { programs.t3code.server.desktopProgram = "desktop"; })
+    .systemd.user.services.t3code-desktop-connect.Service.ExecStart
+)) "desktop connection unit must target the declared server";
 assert lib.assertMsg (lib.hasInfix "glab auth git-credential" (
   lib.last (helpers "gitlab.com")
 )) "glab helper missing";
@@ -283,6 +291,64 @@ assert lib.assertMsg (lib.any (
           grep -q "not valid JSON" errors
           [[ $(cat "$root/linked.json") == "$broken" ]]
         done
+
+        touch "$out"
+      '';
+
+  connect-desktop =
+    pkgs.runCommand "t3code-connect-desktop-test"
+      {
+        nativeBuildInputs = [ pkgs.jq ];
+      }
+      ''
+        mkdir -p bin base/userdata
+        export PATH="$PWD/bin:$PATH" LOG="$PWD/log" SESSIONS="$PWD/sessions.json" T3CODE_HOME="$PWD/base"
+        export XDG_RUNTIME_DIR="$PWD"
+        cat > bin/t3 <<'EOF'
+        #!${pkgs.runtimeShell}
+        case "$1 $2 $3" in
+          "auth session list") cat "$SESSIONS" ;;
+          "auth session issue") echo '{"sessionId": "new", "token": "secret"}' ;;
+          "auth session revoke") echo "revoke $4" >> "$LOG" ;;
+          "environment describe --json") echo '{"environmentId": "env", "label": "host"}' ;;
+          *) exit 2 ;;
+        esac
+        EOF
+        cat > bin/desktop <<'EOF'
+        #!${pkgs.runtimeShell}
+        [[ $1 == --import-connections && $(stat -c %a "$2") == 600 && ! -e $PWD/running ]] || exit 1
+        cp "$2" "$PWD/imported.json"
+        touch "$T3CODE_HOME/userdata/connection-catalog.json"
+        EOF
+        chmod +x bin/*
+        connect() { bash -euo pipefail ${../modules/connect-desktop.sh} desktop http://127.0.0.1:3774; }
+        session() { echo "[{\"sessionId\": \"$1\", \"subject\": \"$2\", \"expiresAt\": \"$(date -u -d "$3" +%Y-%m-%dT%H:%M:%S.000Z)\"}]"; }
+
+        # A running app refuses the import: the new session is revoked, the old one kept.
+        session old nix-t3code:desktop "+2 days" > sessions.json
+        touch running
+        ! connect
+        [[ $(cat log) == "revoke new" ]]
+
+        rm running log
+        connect
+        [[ $(cat log) == "revoke old" ]]
+        jq -e '
+          .schemaVersion == 1
+          and .targets == [{_tag: "BearerConnectionTarget", environmentId: "env", label: "host", connectionId: "bearer:env"}]
+          and (.profiles[0] | .httpBaseUrl == "http://127.0.0.1:3774/" and .wsBaseUrl == "ws://127.0.0.1:3774/")
+          and .credentials == [{connectionId: "bearer:env", credential: {_tag: "BearerConnectionCredential", token: "secret"}}]
+        ' imported.json
+        [[ -z $(find . -name "t3code-connect.*") ]]
+
+        # A fresh session with a saved catalog is left alone; another subject's is not ours.
+        rm log imported.json
+        session fresh nix-t3code:desktop "+20 days" > sessions.json
+        connect
+        [[ ! -e log && ! -e imported.json ]]
+        session other mcp-client "+20 days" > sessions.json
+        connect
+        [[ -e imported.json && ! -e log ]]
 
         touch "$out"
       '';

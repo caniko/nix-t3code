@@ -63,6 +63,9 @@ finer control than Home Manager's built-in `programs.t3code`, which it replaces
   port, so no server needs a public address. `sshHost` takes one destination
   or a list of routes tried in order (LAN, then VPN). A timer pairs over SSH
   and renews each link before it expires.
+- **Desktop connection.** `server.desktopProgram` saves the server in the
+  desktop app's connections (`--import-connections`) and renews its session,
+  for an app that runs with `localEnvironmentEnabled = false`.
 
 The server unit is Linux-only.
 
