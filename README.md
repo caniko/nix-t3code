@@ -66,6 +66,36 @@ finer control than Home Manager's built-in `programs.t3code`, which it replaces
 
 The server unit is Linux-only.
 
+## Shared server (NixOS)
+
+`nixosModules.t3codeServer` runs one T3 Code server per machine as the system
+user `t3code`, with a socket-activated runner per user, so several people share
+a server while agents, terminals and Git run as the thread's owner.
+
+```nix
+{
+  imports = [ inputs.nix-t3code.nixosModules.t3codeServer ];
+
+  services.t3code = {
+    enable = true;
+    package = t3code;
+    host = "0.0.0.0"; # default 127.0.0.1; the firewall stays yours
+    oidc = {
+      issuer = "https://auth.example.org/oauth2/openid/t3code";
+      clientId = "t3code";
+      clientSecretFile = config.age.secrets.t3code-oidc.path;
+      publicOrigins = [ "https://t3.example.org" ];
+      allowedGroup = "t3code_users";
+    };
+    runners.alice.roots = [ "/home/alice" ];
+    operators = [ "alice" ];
+  };
+}
+```
+
+The package must provide `t3 runner`. State is `/var/lib/t3code`; operators
+administer it with `sudo -u t3code /etc/t3code/t3 ...`.
+
 ## Checks
 
 ```console

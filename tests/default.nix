@@ -2,6 +2,7 @@
   pkgs,
   home-manager,
   module,
+  serverModule,
 }:
 let
   inherit (pkgs) lib;
@@ -105,6 +106,48 @@ let
 
   noGh = configuration { programs.gh.enable = lib.mkForce false; };
 
+  # The shared system server: unit names and paths are a contract with the T3
+  # CLI and with modules that extend the units by name.
+  system =
+    (import (pkgs.path + "/nixos/lib/eval-config.nix") {
+      system = null;
+      modules = [
+        serverModule
+        {
+          nixpkgs.pkgs = pkgs;
+          users.users.alice = {
+            isNormalUser = true;
+            home = "/home/alice";
+          };
+          services.t3code = {
+            enable = true;
+            package = pkgs.writeShellScriptBin "t3" "";
+            host = "0.0.0.0";
+            oidc = {
+              issuer = "https://auth.example.org/oauth2/openid/t3code";
+              clientId = "t3code";
+              clientSecretFile = "/run/secrets/t3code";
+              publicOrigins = [
+                "https://a.example.org"
+                "https://b.example.org"
+              ];
+              allowedGroup = "t3code_users";
+            };
+            runners.alice = {
+              roots = [
+                "/home/alice"
+                "/data/alice"
+              ];
+              environment = [ "FOO=bar" ];
+            };
+            operators = [ "alice" ];
+          };
+        }
+      ];
+    }).config;
+  systemServer = system.systemd.services.t3code;
+  runner = system.systemd.services."t3-runner@alice";
+
   activation = config: pkgs.writeText "t3code-activation" config.home.activation.t3codeConfig.data;
   service = first.systemd.user.services.t3code.Service;
   tunnel = toString first.systemd.user.services.t3code-tunnel-peer.Service.ExecStart;
@@ -122,10 +165,9 @@ assert lib.assertMsg (lib.all (entry: builtins.elem entry service.Environment) [
   "T3CODE_LOG_LEVEL=Debug"
   "EXTRA=1"
 ]) "server.environment and raw serviceConfig.Environment must both reach the unit";
-assert lib.assertMsg (lib.hasSuffix
-  "-t3code-tunnel 127.0.0.1:37741:127.0.0.1:3774 tester@lan tester@peer"
-  tunnel
-) "tunnel unit missing";
+assert lib.assertMsg
+  (lib.hasSuffix "-t3code-tunnel 127.0.0.1:37741:127.0.0.1:3774 tester@lan tester@peer" tunnel)
+  "tunnel unit missing";
 assert lib.assertMsg (first.systemd.user.timers ? t3code-link) "link timer missing";
 assert lib.assertMsg (lib.hasInfix "glab auth git-credential" (
   lib.last (helpers "gitlab.com")
@@ -143,6 +185,34 @@ assert lib.assertMsg (
 assert lib.assertMsg (lib.hasInfix "gh auth git-credential" (
   lib.last noGh.programs.git.settings.credential."https://github.com".helper
 )) "gh helper missing when programs.gh is off";
+assert lib.assertMsg
+  (lib.hasSuffix "/bin/t3 serve --host 0.0.0.0 --port 3773" systemServer.serviceConfig.ExecStart)
+  "unexpected system ExecStart";
+assert lib.assertMsg (
+  systemServer.environment.T3CODE_OIDC_PUBLIC_ORIGINS == "https://a.example.org,https://b.example.org"
+  && systemServer.environment.T3CODE_RUNNER_SOCKET_TEMPLATE == "/run/t3code/runner-%u.sock"
+  && systemServer.environment.T3CODE_HOME == system.services.t3code.stateDir
+) "system server environment";
+assert lib.assertMsg (
+  system.systemd.sockets."t3-runner@".listenStreams == [ "/run/t3code/runner-%i.sock" ]
+  && system.systemd.sockets."t3-runner@alice".wantedBy == [ "sockets.target" ]
+  && system.systemd.sockets."t3-runner@alice".overrideStrategy == "asDropin"
+) "runner socket";
+assert lib.assertMsg (
+  builtins.head runner.serviceConfig.ExecStart == ""
+  && lib.hasSuffix "/bin/t3 runner --allow-root /home/alice --allow-root /data/alice" (
+    lib.last runner.serviceConfig.ExecStart
+  )
+  && runner.serviceConfig.Environment == [ "FOO=bar" ]
+  && runner.serviceConfig.WorkingDirectory == "/home/alice"
+) "runner drop-in";
+assert lib.assertMsg (
+  builtins.elem "a+ /data/alice - - - - u:t3code:--x" system.systemd.tmpfiles.rules
+  && !(lib.any (lib.hasPrefix "C ") system.systemd.tmpfiles.rules)
+) "traverse ACLs, and no settings seed without initialSettings";
+assert lib.assertMsg (lib.any (
+  rule: rule.runAs == "t3code" && rule.users == [ "alice" ]
+) system.security.sudo.extraRules) "operator sudo rule";
 {
   activation =
     pkgs.runCommand "t3code-activation-test"
