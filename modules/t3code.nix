@@ -17,6 +17,8 @@ let
   jsonFormat = pkgs.formats.json { };
   json5 = pkgs.python3Packages.toPythonApplication pkgs.python3Packages.json5;
   inherit (cfg) stateDir;
+  # T3 Code's private GEMINI_HOME for the `antigravity` instance (antigravityAuthSupport.ts).
+  antigravityConfigDir = "${stateDir}/providers/antigravity/${builtins.hashString "sha256" "antigravity"}/config";
 
   forgeKinds = [
     "github"
@@ -564,6 +566,19 @@ in
       '';
     };
 
+    antigravityHooks = mkOption {
+      type = types.nullOr types.path;
+      default = null;
+      example = literalExpression "config.programs.harborLlm.lsp.antigravityHooks";
+      description = ''
+        A `hooks.json` for the `antigravity` provider instance, installed as
+        {file}`config/hooks.json` in the private `GEMINI_HOME` T3 Code gives
+        it ({file}`providers/antigravity/<sha256 of the instance id>` in
+        {option}`programs.t3code.stateDir`). Setting it back to `null` removes
+        the file this module installed.
+      '';
+    };
+
     sourceControl = {
       hosts = mkOption {
         type = types.attrsOf (types.submodule hostModule);
@@ -824,6 +839,24 @@ in
         } || [[ -f ${lib.escapeShellArg "${stateDir}/themes/.home-manager"} ]]; then
           t3codeThemes
         fi
+
+        t3codeAntigravityHooks() {
+          local dir=${lib.escapeShellArg antigravityConfigDir}
+          local source=${
+            lib.escapeShellArg (lib.optionalString (cfg.antigravityHooks != null) "${cfg.antigravityHooks}")
+          }
+          if [[ -v DRY_RUN ]]; then
+            verboseEcho "T3 Code: would update Antigravity hooks in $dir"
+          elif [[ -n $source ]]; then
+            # GEMINI_HOME holds the provider's credentials: private, as T3 Code makes it.
+            ${pkgs.coreutils}/bin/install -d -m 0700 -- "''${dir%/config}" "$dir"
+            ${pkgs.coreutils}/bin/install -m 0600 -T -- "$source" "$dir/hooks.json"
+            : > "$dir/.home-manager-hooks"
+          elif [[ -f $dir/.home-manager-hooks ]]; then
+            ${pkgs.coreutils}/bin/rm -f -- "$dir/hooks.json" "$dir/.home-manager-hooks"
+          fi
+        }
+        t3codeAntigravityHooks
       '';
     }
 
