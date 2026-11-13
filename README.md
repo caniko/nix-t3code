@@ -69,7 +69,10 @@ finer control than Home Manager's built-in `programs.t3code`, which it replaces
 - **Antigravity from the store.** `packages.<system>.agy-acp-server` packages
   Google's Antigravity ACP server (unfree, Linux x86_64 and aarch64), and
   `antigravityPackage` makes the `antigravity` provider run it instead of the
-  runtime T3 Code downloads.
+  runtime T3 Code downloads. `antigravityHooks` installs a `hooks.json` into
+  the provider's private profile, such as harbor-llm's
+  `programs.harborLlm.lsp.antigravityHooks`, which reports language-server
+  errors in the files the agent edited.
 
 The server unit is Linux-only.
 

@@ -93,8 +93,10 @@ let
   };
 
   fakeAgy = pkgs.writeShellScriptBin "agy_acp_server.par" "";
+  agyHooks = pkgs.writeText "hooks.json" ''{"lsp":{"PreToolUse":[]}}'';
   first = configuration {
     programs.t3code.antigravityPackage = fakeAgy;
+    programs.t3code.antigravityHooks = agyHooks;
     programs.t3code.themes = {
       broker = theme "#ff0000";
       old = theme "#00ff00";
@@ -259,6 +261,9 @@ assert lib.assertMsg (lib.any (
         jq -e '.linkedEnvironmentsEnabled' "$s"
         jq -e '.providerInstances.antigravity == {"driver": "antigravity", "config": {"binaryPath": "${lib.getExe fakeAgy}"}}' "$s"
         [[ $(stat -c %a "$s") == 600 ]]
+        hooks="$state/providers/antigravity/${builtins.hashString "sha256" "antigravity"}/config/hooks.json"
+        cmp "$hooks" ${agyHooks}
+        [[ ! -L $hooks && $(stat -c %a "$hooks" "''${hooks%/config/hooks.json}") == $'600\n700' ]]
         jq -e '. == {"fontSizeCode": 15, "timestampFormat": "24-hour"}' "$state/client-settings.json"
         jq -e 'map([.key, .command]) == [["mod+k", "y"], ["mod+j", "terminal.toggle"]]' "$state/keybindings.json"
         for id in broker old manual; do [[ -f $state/themes/$id.json && ! -L $state/themes/$id.json ]]; done
@@ -271,6 +276,7 @@ assert lib.assertMsg (lib.any (
 
         activate ${activation second}
         [[ ! -e $state/themes/old.json && -f $state/themes/manual.json ]]
+        [[ ! -e $hooks ]]
         jq -e '.accent == "#0000ff"' "$state/themes/broker.json"
         [[ $(jq -r .defaultThemeSetAt "$s") != "$setAt" ]]
         # Immutable: exactly the declaration, app keys and defaults' app values gone.
