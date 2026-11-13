@@ -72,6 +72,12 @@ let
       inherit defaultThemeSetAt;
     }
     // lib.optionalAttrs (cfg.linkedEnvironments != { }) { linkedEnvironmentsEnabled = true; }
+    // lib.optionalAttrs (cfg.antigravityPackage != null) {
+      providerInstances.antigravity = {
+        driver = "antigravity";
+        config.binaryPath = lib.getExe cfg.antigravityPackage;
+      };
+    }
   ) cfg.userSettings;
 
   effectiveUserSettingsDefaults = lib.recursiveUpdate (lib.optionalAttrs (githubAccounts != { }) {
@@ -542,6 +548,19 @@ in
         {option}`programs.t3code.themes`. Clients connected to the environment
         adopt it, and adopt it again whenever the id or that theme's content
         changes, replacing a theme picked in the client meanwhile.
+      '';
+    };
+
+    antigravityPackage = mkOption {
+      type = types.nullOr types.package;
+      default = null;
+      example = literalExpression "inputs.nix-t3code.packages.\${pkgs.stdenv.hostPlatform.system}.agy-acp-server";
+      description = ''
+        The Antigravity ACP server the `antigravity` provider runs, enforced as
+        its custom executable (`config.binaryPath`) instead of the runtime T3
+        Code downloads into its home. The package's main program must have
+        {file}`localharness_external` beside it, as this flake's
+        `agy-acp-server` does.
       '';
     };
 

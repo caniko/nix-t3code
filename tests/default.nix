@@ -3,6 +3,7 @@
   home-manager,
   module,
   serverModule,
+  agy-acp-server,
 }:
 let
   inherit (pkgs) lib;
@@ -91,7 +92,9 @@ let
     inherit accent;
   };
 
+  fakeAgy = pkgs.writeShellScriptBin "agy_acp_server.par" "";
   first = configuration {
+    programs.t3code.antigravityPackage = fakeAgy;
     programs.t3code.themes = {
       broker = theme "#ff0000";
       old = theme "#00ff00";
@@ -254,6 +257,7 @@ assert lib.assertMsg (lib.any (
         jq -e '.enableProviderUpdateChecks == false and .nested == {"a": 1, "b": 2} and .seeded == "app" and .keep == 1' "$s"
         jq -e '.providerInstances.opencode.enabled and .defaultTheme == "broker" and (.defaultThemeSetAt | startswith("nix-"))' "$s"
         jq -e '.linkedEnvironmentsEnabled' "$s"
+        jq -e '.providerInstances.antigravity == {"driver": "antigravity", "config": {"binaryPath": "${lib.getExe fakeAgy}"}}' "$s"
         [[ $(stat -c %a "$s") == 600 ]]
         jq -e '. == {"fontSizeCode": 15, "timestampFormat": "24-hour"}' "$state/client-settings.json"
         jq -e 'map([.key, .command]) == [["mod+k", "y"], ["mod+j", "terminal.toggle"]]' "$state/keybindings.json"
@@ -406,6 +410,30 @@ assert lib.assertMsg (lib.any (
         # Every peer is tried through the dead route first, then the next one.
         [[ $(grep -c '^ssh down ' log) == 5 ]]
         grep -qx "ssh ok t3 auth pairing create --base-dir '/b' --label '$(id -un)@$(uname -n)'" log
+        touch "$out"
+      '';
+
+  # Patching the launcher appends a segment after the Python app zipped onto
+  # its end; the app's archive must survive intact. The ACP handshake itself
+  # cannot run here: the launcher's tcmalloc aborts without /sys, which the
+  # build sandbox lacks.
+  agy-acp-server =
+    pkgs.runCommand "agy-acp-server-test"
+      {
+        nativeBuildInputs = [
+          pkgs.patchelf
+          pkgs.python3
+        ];
+      }
+      ''
+        set -euo pipefail
+        par=${lib.getExe agy-acp-server}
+        [[ -x ${agy-acp-server}/bin/localharness_external ]]
+        [[ $(patchelf --print-interpreter "$par") == /nix/store/* ]]
+        end=$(python3 -c 'import mmap, sys; f = open(sys.argv[1], "rb"); print(mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ).rfind(b"PK\x05\x06") + 22)' "$par")
+        head -c "$end" "$par" > app.zip
+        python3 -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); z.getinfo(sys.argv[2]); assert z.testzip() is None' \
+          app.zip google3/cloud/developer_experience/antigravity_extensions/acp_server/main.py
         touch "$out"
       '';
 }

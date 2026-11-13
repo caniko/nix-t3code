@@ -66,6 +66,10 @@ finer control than Home Manager's built-in `programs.t3code`, which it replaces
 - **Desktop connection.** `server.desktopProgram` saves the server in the
   desktop app's connections (`--import-connections`) and renews its session,
   for an app that runs with `localEnvironmentEnabled = false`.
+- **Antigravity from the store.** `packages.<system>.agy-acp-server` packages
+  Google's Antigravity ACP server (unfree, Linux x86_64 and aarch64), and
+  `antigravityPackage` makes the `antigravity` provider run it instead of the
+  runtime T3 Code downloads.
 
 The server unit is Linux-only.
 
