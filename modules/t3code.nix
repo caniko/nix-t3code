@@ -192,19 +192,30 @@ let
   ++ cfg.server.extraArgs;
 
   tunnelUnit = name: "t3code-tunnel-${name}";
-  linkPeers = jsonFormat.generate "t3code-linked-environments.json" (
-    lib.mapAttrsToList (_: peer: {
-      url = "http://127.0.0.1:${toString peer.localPort}";
+  linkPeers = jsonFormat.generate "t3code-linked-environments.json" {
+    # Peers link here with the access each one is given there by default.
+    self = {
+      inherit (cfg) urls;
+      access = "approval-required";
+    };
+    mesh = cfg.linkMesh;
+    peers = lib.mapAttrsToList (name: peer: {
+      inherit name;
+      inherit (peer) baseDir command access;
+      urls = peerUrls peer;
       destinations = peer.sshHost;
-      # Run by the peer's login shell; single quotes read the same in POSIX shells and Nushell.
-      pairing = "${peer.command} auth pairing create --json --ttl 5m --base-dir ${lib.escapeShellArg peer.baseDir}";
-      inherit (peer) access;
-    }) cfg.linkedEnvironments
-  );
+    }) cfg.linkedEnvironments;
+  };
+  # A peer without addresses of its own is reached through its tunnel.
+  peerUrls =
+    peer: if peer.urls != [ ] then peer.urls else [ "http://127.0.0.1:${toString peer.localPort}" ];
+  tunneled = lib.filterAttrs (_: peer: peer.urls == [ ]) cfg.linkedEnvironments;
   linkEnvironments = pkgs.writeShellApplication {
     name = "t3code-link-environments";
     runtimeInputs = [
       cfg.package
+      # sh runs this environment's commands as a peer's login shell would.
+      pkgs.bash
       pkgs.coreutils
       pkgs.jq
       pkgs.openssh
@@ -216,6 +227,7 @@ let
     runtimeInputs = [
       cfg.package
       pkgs.coreutils
+      pkgs.gnugrep
       pkgs.jq
     ];
     text = builtins.readFile ./connect-desktop.sh;
@@ -233,7 +245,7 @@ let
     done
     exit 1
   '';
-  localPorts = lib.mapAttrsToList (_: peer: peer.localPort) cfg.linkedEnvironments;
+  localPorts = lib.mapAttrsToList (_: peer: peer.localPort) tunneled;
 
   linkModule = {
     options = {
@@ -246,23 +258,41 @@ let
         description = ''
           SSH destination of the peer machine, as the same user, or a list of
           routes to it tried in order (LAN first, then VPN). Login must work
-          without a prompt (a key or agent), because a user service holds the
-          tunnel.
+          without a prompt (a key or agent), because user services pair over it
+          and hold the tunnel.
+        '';
+      };
+
+      urls = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        example = [
+          "https://t3-workstation.lan.example.org"
+          "https://t3-workstation.vpn.example.org"
+        ];
+        description = ''
+          https addresses where every environment reaches the peer, tried in
+          order. The desktop app uses the last one, so list the most widely
+          reachable route last. Empty: the peer is reached through an SSH
+          tunnel to {option}`port`, here at {option}`localPort`.
         '';
       };
 
       port = mkOption {
-        type = types.port;
+        type = types.nullOr types.port;
+        default = null;
         example = 3773;
-        description = "Port the peer's T3 Code server listens on, on its loopback.";
+        description = "Port the peer's T3 Code server listens on, on its loopback. Needed without {option}`urls`.";
       };
 
       localPort = mkOption {
-        type = types.port;
+        type = types.nullOr types.port;
+        default = null;
         example = 37731;
         description = ''
           Loopback port here that the tunnel forwards to the peer's server. The
           link is made to `http://127.0.0.1:<localPort>`, so keep it stable.
+          Needed without {option}`urls`.
         '';
       };
 
@@ -627,12 +657,38 @@ in
       '';
       description = ''
         Other T3 Code environments to link this one to, so agents here can work
-        there. Each peer gets an SSH tunnel user service from a loopback port
-        here to its server, and {file}`t3code-link.timer` pairs over SSH and
-        runs {command}`t3 environment link` whenever a link is missing or
-        expires within a week. The peer lists the link under Settings →
-        Connections, where it can be revoked. Sets
+        there. {file}`t3code-link.timer` pairs over SSH and runs
+        {command}`t3 environment link` whenever a link is missing or expires
+        within a week, and leaves a desktop session for each peer that
+        {file}`t3code-desktop-connect.service` saves in the app's connections.
+        A peer without {option}`urls` gets an SSH tunnel user service from a
+        loopback port here to its server. The peer lists the link under
+        Settings → Connections, where it can be revoked. Sets
         `linkedEnvironmentsEnabled`; the peer needs it too.
+      '';
+    };
+
+    urls = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "https://t3-laptop.vpn.example.org" ];
+      description = ''
+        https addresses where other environments reach this one's server,
+        tried in order. With {option}`linkMesh`, peers link here through them.
+        This host's name ({command}`uname -n`) names this environment to them.
+      '';
+    };
+
+    linkMesh = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Also link every peer in {option}`linkedEnvironments` to each other one
+        and to this environment, and save each of them in every peer's desktop
+        app, over the same SSH logins. One machine that reaches them all then
+        joins machines that cannot reach each other. Peers need
+        {option}`urls`, and this environment {option}`programs.t3code.urls`, to
+        be linked to.
       '';
     };
 
@@ -960,6 +1016,12 @@ in
             );
           message = "programs.t3code.linkedEnvironments: names must match [A-Za-z0-9_-]+ and local ports must be unique and differ from server.port.";
         }
+        {
+          assertion = lib.all (peer: peer.port != null && peer.localPort != null) (
+            builtins.attrValues tunneled
+          );
+          message = "programs.t3code.linkedEnvironments: a peer without urls needs port and localPort.";
+        }
       ];
 
       systemd.user.services =
@@ -985,11 +1047,11 @@ in
             };
             Install.WantedBy = [ "default.target" ];
           }
-        ) cfg.linkedEnvironments
+        ) tunneled
         // {
           t3code-link =
             let
-              tunnels = map (name: "${tunnelUnit name}.service") (builtins.attrNames cfg.linkedEnvironments);
+              tunnels = map (name: "${tunnelUnit name}.service") (builtins.attrNames tunneled);
             in
             {
               Unit = {
@@ -1001,7 +1063,7 @@ in
                 Type = "oneshot";
                 ExecStart = "${lib.getExe linkEnvironments} ${linkPeers}";
                 Environment = [ "T3CODE_HOME=${cfg.baseDir}" ];
-                TimeoutStartSec = "5min";
+                TimeoutStartSec = "15min";
               };
             };
         };
