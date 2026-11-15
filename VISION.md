@@ -47,8 +47,8 @@ flake checks, and a formatter.
 ## Non-goals
 
 - The server unit is Linux-only.
-- Linked environments need SSH reachability; the module deliberately tunnels to
-  a loopback port instead of requiring a public server address.
+- Linking needs SSH from one machine to each environment: it pairs over SSH.
+  A peer without https `urls` is reached through a tunnel to its loopback.
 
 ## Direction
 

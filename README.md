@@ -59,13 +59,17 @@ finer control than Home Manager's built-in `programs.t3code`, which it replaces
   through such a CLI login.
 - **Service tuning.** `server.{host,port,extraArgs,path,environment,environmentFile,serviceConfig}`.
 - **Linked environments.** `linkedEnvironments.<name>` links this environment
-  to another machine's T3 Code server through an SSH tunnel to a loopback
-  port, so no server needs a public address. `sshHost` takes one destination
-  or a list of routes tried in order (LAN, then VPN). A timer pairs over SSH
-  and renews each link before it expires.
-- **Desktop connection.** `server.desktopProgram` saves the server in the
-  desktop app's connections (`--import-connections`) and renews its session,
-  for an app that runs with `localEnvironmentEnabled = false`.
+  to another machine's T3 Code server, at its https `urls` or else through an
+  SSH tunnel to a loopback port. `sshHost` takes one destination or a list of
+  routes tried in order (LAN, then VPN). A timer pairs over SSH, renews each
+  link before it expires, and leaves a desktop session for each peer. With
+  `linkMesh` and this environment's own `urls`, it also links the peers to each
+  other and to this one, so one machine with SSH to all joins machines that
+  have none.
+- **Desktop connection.** `server.desktopProgram` saves the server, and the
+  peers the link timer left sessions for, in the desktop app's connections
+  (`--import-connections`) and renews its session, for an app that runs with
+  `localEnvironmentEnabled = false`.
 - **Antigravity from the store.** `packages.<system>.agy-acp-server` packages
   Google's Antigravity ACP server (unfree, Linux x86_64 and aarch64), and
   `antigravityPackage` makes the `antigravity` provider run it instead of the

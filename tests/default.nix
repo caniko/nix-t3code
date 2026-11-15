@@ -175,6 +175,11 @@ assert lib.assertMsg
   "tunnel unit missing";
 assert lib.assertMsg (first.systemd.user.timers ? t3code-link) "link timer missing";
 assert lib.assertMsg (
+  !(configuration { programs.t3code.linkedEnvironments.peer.urls = [ "https://peer" ]; })
+  .systemd.user.services
+    ? t3code-tunnel-peer
+) "a peer with urls needs no tunnel";
+assert lib.assertMsg (
   !(first.systemd.user.services ? t3code-desktop-connect)
 ) "desktop connection must be opt-in";
 assert lib.assertMsg (lib.hasSuffix "/bin/desktop http://127.0.0.1:3774" (
@@ -360,6 +365,23 @@ assert lib.assertMsg (lib.any (
         connect
         [[ -e imported.json && ! -e log ]]
 
+        # A peer connection left by t3code-link is imported alone; only its expiry stays.
+        rm imported.json
+        session fresh nix-t3code:desktop "+20 days" > sessions.json
+        mkdir base/desktop-connections
+        echo '{"name": "peer", "environmentId": "p", "label": "peer", "httpBaseUrl": "https://peer.vpn", "token": "t", "expiresAt": "x"}' > base/desktop-connections/peer.json
+        connect
+        [[ ! -e log ]]
+        jq -e '
+          .targets == [{_tag: "BearerConnectionTarget", environmentId: "p", label: "peer", connectionId: "bearer:p"}]
+          and (.profiles[0] | .httpBaseUrl == "https://peer.vpn/" and .wsBaseUrl == "wss://peer.vpn/")
+          and .credentials[0].credential.token == "t"
+        ' imported.json
+        jq -e '. == {name: "peer", environmentId: "p", label: "peer", httpBaseUrl: "https://peer.vpn", expiresAt: "x"}' base/desktop-connections/peer.json
+        rm imported.json
+        connect
+        [[ ! -e imported.json ]]
+
         touch "$out"
       '';
 
@@ -374,14 +396,22 @@ assert lib.assertMsg (lib.any (
         grep -q ControlPath=none ${lib.head (lib.splitString " " tunnel)}
         mkdir bin
         export PATH="$PWD/bin:$PATH" LOG="$PWD/log" LINKS="$PWD/links.json" T3CODE_HOME="$PWD/base"
+        expires() { date -u -d "$1" +%Y-%m-%dT%H:%M:%S.000Z; }
+        export LATER="$(expires '+30 days')"
+        # Answers for environment $T3 (this one, or the SSH destination).
         cat > bin/t3 <<'EOF'
         #!/bin/sh
-        case "$1 $2" in
-          "environment list") cat "$LINKS" ;;
-          "environment link") echo "link $3 $(cat)" >> "$LOG" ;;
+        at="''${T3:-self}"
+        case "$1 $2 $3" in
+          "environment list --json") if [ "$at" = self ]; then cat "$LINKS"; else echo '[]'; fi ;;
+          "environment link "*) echo "link@$at $* $(cat)" >> "$LOG" ;;
+          "auth pairing create") echo "{\"credential\": \"code-$at\"}" ;;
+          "environment describe --json") echo "{\"environmentId\": \"id-$at\", \"label\": \"$at\"}" ;;
+          "auth session issue") echo "{\"token\": \"tok-$at\", \"expiresAt\": \"$LATER\"}" ;;
+          *) exit 2 ;;
         esac
         EOF
-        # Exit 255 (unreachable) for "down", a failed pairing for "bad".
+        # Exit 255 (unreachable) for "down"; every command fails for "bad".
         cat > bin/ssh <<'EOF'
         #!/bin/sh
         destination="$5"
@@ -390,18 +420,19 @@ assert lib.assertMsg (lib.any (
           down) exit 255 ;;
           bad) exit 1 ;;
         esac
-        echo "{\"credential\": \"code-$destination\"}"
+        T3="$destination" exec sh -c "$6"
         EOF
         chmod +x bin/*
-        expires() { date -u -d "$1" +%Y-%m-%dT%H:%M:%S.000Z; }
+        mkdir -p base/desktop-connections
+        echo "{\"name\": \"fresh\", \"expiresAt\": \"$(expires '+20 days')\"}" > base/desktop-connections/fresh.json
         cat > links.json <<EOF
         [
           {"urls": ["http://127.0.0.1:1"], "status": "reachable", "expiresAt": "$(expires '+30 days')"},
           {"urls": ["http://127.0.0.1:2"], "status": "reachable", "expiresAt": "$(expires '+2 days')"}
         ]
         EOF
-        peer() { echo "{\"url\": \"http://127.0.0.1:$1\", \"destinations\": [\"down\", \"$2\"], \"pairing\": \"t3 auth pairing create --base-dir '/b'\", \"access\": \"read-only\"}"; }
-        echo "[$(peer 1 fresh), $(peer 2 soon), $(peer 3 down), $(peer 4 ok), $(peer 5 bad)]" > peers.json
+        peer() { echo "{\"name\": \"$2\", \"urls\": [\"http://127.0.0.1:$1\"], \"destinations\": [\"down\", \"$3\"], \"command\": \"t3\", \"baseDir\": \"/b\", \"access\": \"read-only\"}"; }
+        echo "{\"self\": {\"urls\": [], \"access\": \"approval-required\"}, \"mesh\": false, \"peers\": [$(peer 1 fresh fresh), $(peer 2 soon soon), $(peer 3 off down), $(peer 4 ok ok), $(peer 5 bad bad)]}" > peers.json
 
         set +e
         bash -euo pipefail ${../modules/link-environments.sh} peers.json
@@ -409,13 +440,33 @@ assert lib.assertMsg (lib.any (
         set -e
         # A failed pairing fails the run; an unreachable peer does not.
         [[ $status == 1 ]]
-        grep -qx "link http://127.0.0.1:2 code-soon" log
-        grep -qx "link http://127.0.0.1:4 code-ok" log
-        [[ $(grep -c '^link ' log) == 2 ]]
-        if grep -q ' fresh ' log; then exit 1; fi
-        # Every peer is tried through the dead route first, then the next one.
+        grep -qx "link@self environment link http://127.0.0.1:2 --expect-environment-id id-soon --pairing-code - --access read-only --base-dir $T3CODE_HOME code-soon" log
+        grep -qx "link@self environment link http://127.0.0.1:4 --expect-environment-id id-ok --pairing-code - --access read-only --base-dir $T3CODE_HOME code-ok" log
+        [[ $(grep -c '^link' log) == 2 ]]
+        if grep -q '^ssh fresh ' log; then exit 1; fi
+        # The dead route is tried once per peer; the one that answered goes first after.
         [[ $(grep -c '^ssh down ' log) == 5 ]]
-        grep -qx "ssh ok t3 auth pairing create --base-dir '/b' --label '$(id -un)@$(uname -n)'" log
+        grep -qx "ssh ok t3 auth pairing create --json --ttl 5m --label '$(id -un)@$(uname -n)' --base-dir '/b'" log
+        # Desktop sessions for the peers that answered, saved privately; a fresh one is kept.
+        jq -e --arg later "$LATER" '. == {name: "ok", environmentId: "id-ok", label: "ok", httpBaseUrl: "http://127.0.0.1:4", token: "tok-ok", expiresAt: $later}' base/desktop-connections/ok.json
+        [[ $(stat -c %a base/desktop-connections/ok.json) == 600 ]]
+        [[ -f base/desktop-connections/soon.json && ! -e base/desktop-connections/bad.json && ! -e base/desktop-connections/off.json ]]
+        jq -e 'has("token") | not' base/desktop-connections/fresh.json
+
+        # Mesh: each peer links to the others and to this environment, and gets their desktop sessions.
+        rm log
+        mesh() { echo "{\"name\": \"$1\", \"urls\": [\"https://$1.lan\", \"https://$1.vpn\"], \"destinations\": [\"$1\"], \"command\": \"t3\", \"baseDir\": \"$PWD/mesh-$1\", \"access\": \"auto\"}"; }
+        echo "{\"self\": {\"urls\": [\"https://self.vpn\"], \"access\": \"approval-required\"}, \"mesh\": true, \"peers\": [$(mesh a), $(mesh b)]}" > mesh.json
+        echo '[]' > links.json
+        bash -euo pipefail ${../modules/link-environments.sh} mesh.json
+        grep -qx "link@a environment link https://self.vpn --expect-environment-id id-self --pairing-code - --access approval-required --base-dir $PWD/mesh-a code-self" log
+        grep -qx "link@a environment link https://b.lan --expect-environment-id id-b --url https://b.vpn --pairing-code - --access auto --base-dir $PWD/mesh-a code-b" log
+        grep -qx "link@b environment link https://a.lan --expect-environment-id id-a --url https://a.vpn --pairing-code - --access auto --base-dir $PWD/mesh-b code-a" log
+        grep -qx "link@self environment link https://a.lan --expect-environment-id id-a --url https://a.vpn --pairing-code - --access auto --base-dir $T3CODE_HOME code-a" log
+        [[ $(grep -c '^link' log) == 6 ]]
+        jq -e '.httpBaseUrl == "https://self.vpn" and .token == "tok-self"' mesh-a/desktop-connections/$(uname -n).json
+        jq -e '.httpBaseUrl == "https://b.vpn" and .token == "tok-b"' mesh-a/desktop-connections/b.json
+        jq -e '.httpBaseUrl == "https://a.vpn"' base/desktop-connections/a.json
         touch "$out"
       '';
 
