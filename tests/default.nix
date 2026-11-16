@@ -187,6 +187,10 @@ assert lib.assertMsg (lib.hasSuffix "/bin/desktop http://127.0.0.1:3774" (
     (configuration { programs.t3code.server.desktopProgram = "desktop"; })
     .systemd.user.services.t3code-desktop-connect.Service.ExecStart
 )) "desktop connection unit must target the declared server";
+assert lib.assertMsg (
+  (configuration { programs.t3code.server.desktopProgram = "desktop"; })
+  .systemd.user.services.t3code-desktop-connect.Service.Type != "oneshot"
+) "a Home Manager switch must not wait on the desktop import";
 assert lib.assertMsg (lib.hasInfix "glab auth git-credential" (
   lib.last (helpers "gitlab.com")
 )) "glab helper missing";

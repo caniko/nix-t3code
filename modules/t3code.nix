@@ -979,7 +979,9 @@ in
           ];
         };
         Service = {
-          Type = "oneshot";
+          # Started, not awaited: a Home Manager switch starts this unit, and an
+          # import that stalls must not hold the activation up.
+          Type = "exec";
           ExecStart = lib.escapeShellArgs [
             (lib.getExe connectDesktop)
             (lib.getExe' cfg.package cfg.server.desktopProgram)
@@ -988,7 +990,7 @@ in
             }:${toString cfg.server.port}"
           ];
           Environment = [ "T3CODE_HOME=${cfg.baseDir}" ];
-          TimeoutStartSec = "3min";
+          RuntimeMaxSec = "3min";
         };
         # The app's keyring and display only exist in a graphical session.
         Install.WantedBy = [ "graphical-session.target" ];
