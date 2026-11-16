@@ -388,10 +388,15 @@ assert lib.assertMsg (lib.any (
   link-environments =
     pkgs.runCommand "t3code-link-environments-test"
       {
-        nativeBuildInputs = [ pkgs.jq ];
+        nativeBuildInputs = [
+          pkgs.jq
+          pkgs.shellcheck
+        ];
       }
       ''
         set -euo pipefail
+        # writeShellApplication fails the packaged scripts on any shellcheck finding.
+        shellcheck -s bash ${../modules/link-environments.sh} ${../modules/connect-desktop.sh}
         # The tunnel must not reuse an SSH control master.
         grep -q ControlPath=none ${lib.head (lib.splitString " " tunnel)}
         mkdir bin

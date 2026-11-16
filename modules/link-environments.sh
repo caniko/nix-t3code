@@ -20,6 +20,8 @@ for name in "${names[@]}"; do
   routes[$name]="$(jq -r --arg name "$name" '.[$name].destinations | join(" ")' <<<"$config")"
 done
 field() { jq -r --arg name "$1" ".[\$name].$2" <<<"$config"; }
+# A jq filter: $before is its argument, not a shell variable.
+# shellcheck disable=SC2016
 fresh='.expiresAt == null or (.expiresAt | sub("\\.[0-9]+"; "") | fromdateiso8601) > $before'
 
 # Runs $2 in the login shell of environment $1 (sh for this one), with $3 as
