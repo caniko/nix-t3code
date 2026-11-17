@@ -335,7 +335,8 @@ assert lib.assertMsg (lib.any (
         EOF
         cat > bin/desktop <<'EOF'
         #!${pkgs.runtimeShell}
-        [[ $1 == --import-connections && $(stat -c %a "$2") == 600 && ! -e $PWD/running ]] || exit 1
+        [[ ! -e $PWD/running ]] || { echo "T3 Code is already running. Quit it before importing saved connections."; exit 1; }
+        [[ $1 == --import-connections && $(stat -c %a "$2") == 600 && ! -e $PWD/broken ]] || exit 1
         cp "$2" "$PWD/imported.json"
         touch "$T3CODE_HOME/userdata/connection-catalog.json"
         EOF
@@ -343,13 +344,19 @@ assert lib.assertMsg (lib.any (
         connect() { bash -euo pipefail ${../modules/connect-desktop.sh} desktop http://127.0.0.1:3774; }
         session() { echo "[{\"sessionId\": \"$1\", \"subject\": \"$2\", \"expiresAt\": \"$(date -u -d "$3" +%Y-%m-%dT%H:%M:%S.000Z)\"}]"; }
 
-        # A running app refuses the import: the new session is revoked, the old one kept.
+        # A running app refuses the import, which waits for its launcher: the
+        # new session is revoked, the old one kept, and the unit does not fail.
         session old nix-t3code:desktop "+2 days" > sessions.json
         touch running
+        connect
+        [[ $(cat log) == "revoke new" ]]
+        # Any other refusal fails.
+        rm running log
+        touch broken
         ! connect
         [[ $(cat log) == "revoke new" ]]
 
-        rm running log
+        rm broken log
         connect
         [[ $(cat log) == "revoke old" ]]
         jq -e '
@@ -388,6 +395,45 @@ assert lib.assertMsg (lib.any (
 
         touch "$out"
       '';
+
+  desktop-launcher =
+    let
+      app =
+        pkgs.runCommand "fake-t3code-1.0"
+          {
+            pname = "fake-t3code";
+            version = "1.0";
+          }
+          ''
+            mkdir -p $out/bin $out/share/applications
+            printf '#!${pkgs.runtimeShell}\necho launched "$@"\n' > $out/bin/desktop
+            printf '#!${pkgs.runtimeShell}\nexit 1\n' > $out/bin/t3
+            chmod +x $out/bin/*
+            printf '[Desktop Entry]\nTryExec=/nix/store/x-app/bin/desktop\nExec=/nix/store/x-app/bin/desktop %%U\n' \
+              > $out/share/applications/t3code.desktop
+          '';
+      connected = configuration {
+        programs.t3code.package = lib.mkForce app;
+        programs.t3code.server.desktopProgram = "desktop";
+      };
+      launcher = lib.findFirst (p: lib.hasSuffix "-connecting" p.name) null connected.home.packages;
+      connect = lib.head (
+        lib.splitString " " (
+          toString connected.systemd.user.services.t3code-desktop-connect.Service.ExecStart
+        )
+      );
+    in
+    pkgs.runCommand "t3code-desktop-launcher-test" { } ''
+      # The entry starts the launcher, which starts the app even when the import fails.
+      grep -qx "Exec=${launcher}/bin/desktop %U" ${launcher}/share/applications/t3code.desktop
+      grep -qx "TryExec=${launcher}/bin/desktop" ${launcher}/share/applications/t3code.desktop
+      [[ ${launcher.pname} == fake-t3code && ${launcher.version} == 1.0 ]]
+      # The import runs with the profile's launcher first on PATH, which the
+      # app registers as its URL handler.
+      grep -qF 'PATH="${connected.home.profileDirectory}/bin:${app}/bin:' ${connect}
+      [[ $(${launcher}/bin/desktop a) == "launched a" ]]
+      touch $out
+    '';
 
   link-environments =
     pkgs.runCommand "t3code-link-environments-test"
