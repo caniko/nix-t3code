@@ -49,10 +49,14 @@ jq -s '
       remoteDpopTokens: [],
       disabledEnvironmentIds: []
     }' "${entries[@]}" >"$dir/connections.json"
-if ! "$1" --import-connections "$dir/connections.json"; then
+if ! imported="$("$1" --import-connections "$dir/connections.json" 2>&1)"; then
+  printf '%s\n' "$imported"
   [[ $own == false ]] || revoke "$(jq -r .sessionId <<<"$issued")"
+  # A running app is no failure: its launcher imports before the next start.
+  grep -q "already running" <<<"$imported" && exit 0
   exit 1
 fi
+printf '%s\n' "$imported"
 # Imported: keep only the expiry, which t3code-link reads to renew in time.
 for file in "${pending[@]}"; do
   jq 'del(.token)' "$file" >"$file.new" && mv "$file.new" "$file"

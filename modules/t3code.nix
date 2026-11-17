@@ -225,12 +225,50 @@ let
   connectDesktop = pkgs.writeShellApplication {
     name = "t3code-connect-desktop";
     runtimeInputs = [
+      # The app registers its URL handler as the first program of its name on
+      # PATH: the profile's launcher, not the package's bare program.
+      config.home.profileDirectory
       cfg.package
       pkgs.coreutils
       pkgs.gnugrep
       pkgs.jq
     ];
     text = builtins.readFile ./connect-desktop.sh;
+  };
+  # The desktop program and this server's URL, as t3code-connect-desktop takes them.
+  connectArgs = [
+    (lib.getExe' cfg.package cfg.server.desktopProgram)
+    "http://${
+      if cfg.server.host == null || cfg.server.host == "0.0.0.0" then "127.0.0.1" else cfg.server.host
+    }:${toString cfg.server.port}"
+  ];
+  # The app takes an import only while it is not running, so its launcher
+  # imports pending connections first; a failed import never blocks the app.
+  connectingPackage = pkgs.symlinkJoin {
+    name = "${cfg.package.name}-connecting";
+    paths = [ cfg.package ];
+    passthru = lib.getAttrs (builtins.filter (attr: cfg.package ? ${attr}) [
+      "pname"
+      "version"
+    ]) cfg.package;
+    postBuild = ''
+      program="$out/bin/${cfg.server.desktopProgram}"
+      rm -f "$program"
+      cat > "$program" <<EOF
+      #!${pkgs.runtimeShell}
+      T3CODE_HOME=${lib.escapeShellArg cfg.baseDir} ${pkgs.coreutils}/bin/timeout 30 ${
+        lib.escapeShellArgs ([ (lib.getExe connectDesktop) ] ++ connectArgs)
+      } >/dev/null 2>&1 || true
+      exec ${lib.escapeShellArg (lib.getExe' cfg.package cfg.server.desktopProgram)} "\$@"
+      EOF
+      chmod +x "$program"
+      for entry in "$out"/share/applications/*.desktop; do
+        [ -e "$entry" ] || continue
+        target=$(readlink -f "$entry")
+        rm "$entry"
+        sed -E "s#^(Exec|TryExec)=[^ ]*/bin/${cfg.server.desktopProgram}( |$)#\1=$program\2#" "$target" > "$entry"
+      done
+    '';
   };
   # Holds the forward ($1) through each SSH destination in turn; the unit
   # restarts from the first one when all have failed or dropped.
@@ -719,7 +757,8 @@ in
           app's connections, so an app with `localEnvironmentEnabled = false`
           finds it without pairing by hand. The app must support
           {command}`--import-connections`, and only takes the import while it
-          is not running; the unit retries hourly. Needs
+          is not running, so the app's launcher imports first and the unit
+          retries hourly. Needs
           {option}`programs.t3code.server.port`.
         '';
       };
@@ -813,7 +852,9 @@ in
       ];
 
       home.packages =
-        lib.optional (cfg.package != null) cfg.package
+        lib.optional (cfg.package != null) (
+          if cfg.server.enable && cfg.server.desktopProgram != null then connectingPackage else cfg.package
+        )
         ++ lib.optional (hasKind "github") cfg.sourceControl.githubPackage
         ++ lib.optional (hasKind "gitlab") cfg.sourceControl.gitlabPackage
         ++ lib.optional (hasKind "forgejo") cfg.sourceControl.forgejoPackage;
@@ -982,13 +1023,7 @@ in
           # Started, not awaited: a Home Manager switch starts this unit, and an
           # import that stalls must not hold the activation up.
           Type = "exec";
-          ExecStart = lib.escapeShellArgs [
-            (lib.getExe connectDesktop)
-            (lib.getExe' cfg.package cfg.server.desktopProgram)
-            "http://${
-              if cfg.server.host == null || cfg.server.host == "0.0.0.0" then "127.0.0.1" else cfg.server.host
-            }:${toString cfg.server.port}"
-          ];
+          ExecStart = lib.escapeShellArgs ([ (lib.getExe connectDesktop) ] ++ connectArgs);
           Environment = [ "T3CODE_HOME=${cfg.baseDir}" ];
           RuntimeMaxSec = "3min";
         };
