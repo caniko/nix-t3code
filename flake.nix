@@ -20,18 +20,7 @@
         "x86_64-linux"
         "aarch64-linux"
       ];
-      # agy-acp-server (the Antigravity CLI) is Google's unfree binary.
-      forAllSystems =
-        f:
-        nixpkgs.lib.genAttrs systems (
-          system:
-          f (
-            import nixpkgs {
-              inherit system;
-              config.allowUnfreePredicate = pkg: nixpkgs.lib.getName pkg == "agy-acp-server";
-            }
-          )
-        );
+      forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
     in
     {
       homeManagerModules = {
@@ -41,17 +30,12 @@
 
       nixosModules.t3codeServer = ./modules/server.nix;
 
-      packages = forAllSystems (pkgs: {
-        agy-acp-server = pkgs.callPackage ./packages/agy-acp-server.nix { };
-      });
-
       checks = forAllSystems (
         pkgs:
         import ./tests {
           inherit pkgs home-manager;
           module = self.homeManagerModules.t3code;
           serverModule = self.nixosModules.t3codeServer;
-          agy-acp-server = self.packages.${pkgs.stdenv.hostPlatform.system}.agy-acp-server;
         }
       );
 

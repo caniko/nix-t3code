@@ -3,7 +3,6 @@
   home-manager,
   module,
   serverModule,
-  agy-acp-server,
 }:
 let
   inherit (pkgs) lib;
@@ -524,7 +523,4 @@ assert lib.assertMsg (lib.any (
         jq -e '.httpBaseUrl == "https://a.vpn"' base/desktop-connections/a.json
         touch "$out"
       '';
-
-  # The package's install check runs the patched CLI (`antigravity --version`).
-  inherit agy-acp-server;
 }
