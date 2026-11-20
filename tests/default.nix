@@ -525,27 +525,6 @@ assert lib.assertMsg (lib.any (
         touch "$out"
       '';
 
-  # Patching the launcher appends a segment after the Python app zipped onto
-  # its end; the app's archive must survive intact. The ACP handshake itself
-  # cannot run here: the launcher's tcmalloc aborts without /sys, which the
-  # build sandbox lacks.
-  agy-acp-server =
-    pkgs.runCommand "agy-acp-server-test"
-      {
-        nativeBuildInputs = [
-          pkgs.patchelf
-          pkgs.python3
-        ];
-      }
-      ''
-        set -euo pipefail
-        par=${lib.getExe agy-acp-server}
-        [[ -x ${agy-acp-server}/bin/localharness_external ]]
-        [[ $(patchelf --print-interpreter "$par") == /nix/store/* ]]
-        end=$(python3 -c 'import mmap, sys; f = open(sys.argv[1], "rb"); print(mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ).rfind(b"PK\x05\x06") + 22)' "$par")
-        head -c "$end" "$par" > app.zip
-        python3 -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); z.getinfo(sys.argv[2]); assert z.testzip() is None' \
-          app.zip google3/cloud/developer_experience/antigravity_extensions/acp_server/main.py
-        touch "$out"
-      '';
+  # The package's install check runs the patched CLI (`antigravity --version`).
+  inherit agy-acp-server;
 }

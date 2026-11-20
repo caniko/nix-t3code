@@ -20,7 +20,7 @@
         "x86_64-linux"
         "aarch64-linux"
       ];
-      # agy-acp-server is Google's unfree binary.
+      # agy-acp-server (the Antigravity CLI) is Google's unfree binary.
       forAllSystems =
         f:
         nixpkgs.lib.genAttrs systems (

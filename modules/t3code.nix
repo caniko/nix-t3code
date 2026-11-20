@@ -628,9 +628,10 @@ in
       description = ''
         The Antigravity ACP server the `antigravity` provider runs, enforced as
         its custom executable (`config.binaryPath`) instead of the runtime T3
-        Code downloads into its home. The package's main program must have
-        {file}`localharness_external` beside it, as this flake's
-        `agy-acp-server` does.
+        Code downloads into its home. The main program is either the
+        Antigravity CLI, named `agy` or `antigravity` (T3 runs it as
+        `<program> acp`), as this flake's `agy-acp-server` is, or a legacy
+        {file}`agy_acp_server.par` with {file}`localharness_external` beside it.
       '';
     };
 

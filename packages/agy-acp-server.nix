@@ -1,61 +1,60 @@
-# Google's Antigravity ACP server, the runtime T3 Code otherwise downloads into
-# its home. Release URLs and hashes match apps/server/src/provider/antigravityRelease.ts.
+# Google's Antigravity CLI, which serves ACP itself (`antigravity acp`) since
+# 1.5.0 and replaced the standalone agy-acp-server zip T3 Code used to run.
+# Version and URLs follow the CLI auto-updater's stable manifests:
+# https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_{amd64,arm64}.json
 {
   lib,
-  stdenv,
+  stdenvNoCC,
   fetchurl,
-  unzip,
   autoPatchelfHook,
+  versionCheckHook,
 }:
 let
-  version = "1.4.5";
+  version = "1.5.13";
+  buildId = "5999302598852608";
   releases = {
     x86_64-linux = {
-      arch = "x86_64";
-      hash = "sha256-kjkjoNfcgHP2bMb3hkejEH46fuK34aJN+LOSe1GIATs=";
+      path = "linux-x64/cli_linux_x64";
+      hash = "sha256-f6nMbfDQlWJpPWN8QGqGwbD1KrM2RxSx/S15zGBg1LI=";
     };
     aarch64-linux = {
-      arch = "arm64";
-      hash = "sha256-fWQkZjOuCU9n47vNLWeeiQSPkTRtUzkxMzbnSD9A8FY=";
+      path = "linux-arm/cli_linux_arm64";
+      hash = "sha256-Nllq2AOFMf118Ol7W6iWejDy/Wf42cYZWdLkdh17IV8=";
     };
   };
   release =
-    releases.${stdenv.hostPlatform.system}
-      or (throw "agy-acp-server: unsupported system ${stdenv.hostPlatform.system}");
+    releases.${stdenvNoCC.hostPlatform.system}
+      or (throw "agy-acp-server: unsupported system ${stdenvNoCC.hostPlatform.system}");
 in
-stdenv.mkDerivation {
+stdenvNoCC.mkDerivation {
   pname = "agy-acp-server";
   inherit version;
 
   src = fetchurl {
-    url = "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-${version}-linux-${release.arch}.zip";
+    url = "https://storage.googleapis.com/antigravity-public/antigravity-cli/${version}-${buildId}/${release.path}.tar.gz";
     inherit (release) hash;
   };
 
-  nativeBuildInputs = [
-    unzip
-    autoPatchelfHook
-  ];
+  nativeBuildInputs = [ autoPatchelfHook ];
   sourceRoot = ".";
 
-  # The .par is an ELF launcher with the Python app zipped onto its end: stripping
-  # or shrinking it would cut the payload. Only the interpreter needs patching.
-  dontStrip = true;
-  dontPatchELF = true;
-
-  # T3 runs bin/agy_acp_server.par and requires localharness_external next to it.
+  # T3 recognises the CLI by its file name (agy or antigravity) and then runs
+  # `<binary> acp` with no localharness_external sibling.
   installPhase = ''
     runHook preInstall
-    install -Dm755 -t $out/bin agy_acp_server.par localharness_external
+    install -Dm755 antigravity $out/bin/antigravity
     runHook postInstall
   '';
 
+  nativeInstallCheckInputs = [ versionCheckHook ];
+  doInstallCheck = true;
+
   meta = {
-    description = "Google Antigravity Agent Client Protocol server";
+    description = "Google Antigravity CLI, run by T3 Code as its Agent Client Protocol server";
     homepage = "https://antigravity.google";
     license = lib.licenses.unfree;
     sourceProvenance = [ lib.sourceTypes.binaryNativeCode ];
     platforms = builtins.attrNames releases;
-    mainProgram = "agy_acp_server.par";
+    mainProgram = "antigravity";
   };
 }
