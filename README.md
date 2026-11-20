@@ -70,10 +70,9 @@ finer control than Home Manager's built-in `programs.t3code`, which it replaces
   peers the link timer left sessions for, in the desktop app's connections
   (`--import-connections`) and renews its session, for an app that runs with
   `localEnvironmentEnabled = false`.
-- **Antigravity from the store.** `packages.<system>.agy-acp-server` packages
-  the Antigravity CLI, Google's ACP server (unfree, Linux x86_64 and aarch64), and
-  `antigravityPackage` makes the `antigravity` provider run it instead of the
-  runtime T3 Code downloads. `antigravityHooks` installs a `hooks.json` into
+- **Antigravity from the store.** `antigravityPackage` makes the
+  `antigravity` provider run a store copy of the Antigravity CLI, such as
+  nixpkgs' `antigravity-cli`, instead of the runtime T3 Code downloads. `antigravityHooks` installs a `hooks.json` into
   the provider's private profile, such as harbor-llm's
   `programs.harborLlm.lsp.antigravityHooks`, which reports language-server
   errors in the files the agent edited.

@@ -624,13 +624,13 @@ in
     antigravityPackage = mkOption {
       type = types.nullOr types.package;
       default = null;
-      example = literalExpression "inputs.nix-t3code.packages.\${pkgs.stdenv.hostPlatform.system}.agy-acp-server";
+      example = literalExpression "pkgs.antigravity-cli";
       description = ''
         The Antigravity ACP server the `antigravity` provider runs, enforced as
         its custom executable (`config.binaryPath`) instead of the runtime T3
         Code downloads into its home. The main program is either the
         Antigravity CLI, named `agy` or `antigravity` (T3 runs it as
-        `<program> acp`), as this flake's `agy-acp-server` is, or a legacy
+        `<program> acp`), as nixpkgs' `antigravity-cli` is, or a legacy
         {file}`agy_acp_server.par` with {file}`localharness_external` beside it.
       '';
     };
