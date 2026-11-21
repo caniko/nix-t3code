@@ -110,6 +110,58 @@ let
 
   noGh = configuration { programs.gh.enable = lib.mkForce false; };
 
+  proxy = {
+    url = "http://127.0.0.1:8317";
+    # Created at runtime inside the Linux Nix build sandbox.
+    managementKeyFile = "/build/proxy-key";
+  };
+  usageConfiguration =
+    extra:
+    configuration (
+      lib.recursiveUpdate {
+        programs.t3code.baseDir = "/build/home/.t3";
+      } extra
+    );
+  usage = usageConfiguration {
+    systemd.user.services.t3code.Unit = {
+      After = [ "proxy.service" ];
+      Wants = [ "proxy.service" ];
+    };
+    programs.t3code = {
+      server.serviceConfig.ExecStartPre = "/bin/true";
+      usageLimitSources = {
+        "Local.proxy" = proxy;
+        reference = {
+          inherit (proxy) url;
+          label = "Referenced proxy";
+          enable = false;
+          managementKey = {
+            provider = "vault";
+            reference = "proxy/management";
+          };
+        };
+        missing = proxy // {
+          managementKeyFile = "/build/missing-key";
+        };
+      };
+    };
+  };
+  usageEmpty = usageConfiguration { };
+  usageRequired = usageConfiguration {
+    programs.t3code.usageLimitSources."Local.proxy" = proxy // {
+      optional = false;
+    };
+  };
+  usageConflict = configuration {
+    programs.t3code.usageLimitSources.conflict = proxy // {
+      managementKey = "not-a-secret";
+    };
+  };
+  usageBadId = configuration {
+    programs.t3code.usageLimitSources."../proxy" = proxy;
+  };
+  usagePre = usage.systemd.user.services.t3code.Service.ExecStartPre;
+
   # The shared system server: unit names and paths are a contract with the T3
   # CLI and with modules that extend the units by name.
   system =
@@ -169,6 +221,25 @@ assert lib.assertMsg (lib.all (entry: builtins.elem entry service.Environment) [
   "T3CODE_LOG_LEVEL=Debug"
   "EXTRA=1"
 ]) "server.environment and raw serviceConfig.Environment must both reach the unit";
+assert lib.assertMsg (
+  builtins.length usagePre == 2
+  && builtins.head usagePre == "/bin/true"
+  && lib.hasSuffix "/bin/t3code-sync-usage-limit-sources" (lib.last usagePre)
+  && !(usageEmpty.systemd.user.services.t3code.Service ? ExecStartPre)
+) "usage-limit sync must follow configured ExecStartPre hooks and be opt-in";
+assert lib.assertMsg (
+  lib.all (unit: builtins.elem unit usage.systemd.user.services.t3code.Unit.After) [
+    "network.target"
+    "proxy.service"
+  ]
+  && usage.systemd.user.services.t3code.Unit.Wants == [ "proxy.service" ]
+) "users can add proxy dependencies via normal unit merging";
+assert lib.assertMsg (
+  !(builtins.tryEval usageConflict).success
+) "conflicting usage-limit credentials must fail Home Manager assertions";
+assert lib.assertMsg (
+  !(builtins.tryEval usageBadId).success
+) "invalid usage-limit IDs must fail Home Manager assertions";
 assert lib.assertMsg
   (lib.hasSuffix "-t3code-tunnel 127.0.0.1:37741:127.0.0.1:3774 tester@lan tester@peer" tunnel)
   "tunnel unit missing";
@@ -235,6 +306,69 @@ assert lib.assertMsg (lib.any (
   rule: rule.runAs == "t3code" && rule.users == [ "alice" ]
 ) system.security.sudo.extraRules) "operator sudo rule";
 {
+  usage-limit-sources =
+    pkgs.runCommand "t3code-usage-limit-sources-test" { nativeBuildInputs = [ pkgs.jq ]; }
+      ''
+        set -euo pipefail
+        root="$PWD/home"
+        state="$root/.t3/userdata"
+        s="$state/settings.json"
+        manifest="$state/.home-manager-usage-sources"
+        mkdir -p "$state"
+        errorEcho() { echo "$*" >&2; }
+        verboseEcho() { :; }
+        activate() { source "$1"; }
+        trap 'if [[ -f notice ]]; then cat notice >&2; fi' EXIT
+        echo '{"keep":42,"usageLimitSources":{"manual":{"enabled":true},"missing":{"enabled":false}}}' > "$s"
+        cp "$s" original.json
+
+        # This value does not exist until the check runs, after its inputs were built.
+        secret=$(cat /proc/sys/kernel/random/uuid)
+        printf '%s\n\n' "$secret" > proxy-key
+        if grep -Fq "$secret" ${activation usage} ${lib.last usagePre}; then exit 1; fi
+        (unset DRY_RUN; DRY_RUN=1; activate ${activation usage})
+        cmp original.json "$s"
+        [[ ! -e $manifest ]]
+
+        activate ${activation usage} 2> notice
+        grep -q 'missing' notice
+        jq -e '
+          .keep == 42 and
+          .usageLimitSources == {
+            manual: {enabled: true},
+            missing: {enabled: false},
+            "Local.proxy": {
+              kind: "cliproxy", url: "${proxy.url}", enabled: true,
+              managementKey: ($key | rtrimstr("\n\n"))
+            },
+            reference: {
+              kind: "cliproxy", url: "${proxy.url}", enabled: false,
+              label: "Referenced proxy",
+              managementKey: {provider: "vault", reference: "proxy/management"}
+            }
+          }
+        ' --rawfile key proxy-key "$s"
+        [[ $(stat -c %a "$s") == 600 ]]
+        [[ $(cat "$manifest") == $'Local.proxy\nreference' ]]
+
+        # The unit rereads rotated keys. A previously installed source is kept
+        # if its optional key disappears, but is still removed when undeclared.
+        printf '%s\n' "rotated-$secret" > proxy-key
+        ${lib.last usagePre}
+        jq -e '.usageLimitSources["Local.proxy"].managementKey == ($key | rtrimstr("\n"))' --rawfile key proxy-key "$s"
+        rm proxy-key
+        cp "$s" synced.json
+        ${lib.last usagePre}
+        cmp synced.json "$s"
+        if ${lib.last usageRequired.systemd.user.services.t3code.Service.ExecStartPre}; then exit 1; fi
+        cmp synced.json "$s"
+
+        activate ${activation usageEmpty}
+        jq -e '.keep == 42 and .usageLimitSources == {manual: {enabled: true}, missing: {enabled: false}}' "$s"
+        [[ ! -e $manifest ]]
+        touch "$out"
+      '';
+
   activation =
     pkgs.runCommand "t3code-activation-test"
       {
