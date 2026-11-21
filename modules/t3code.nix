@@ -175,6 +175,103 @@ let
       "t3-code"
     ];
 
+  usageSourceIds = builtins.attrNames cfg.usageLimitSources;
+  usageSourceIdPattern = "^[A-Za-z0-9][A-Za-z0-9._-]*$";
+  usageSourceManifest = "${stateDir}/.home-manager-usage-sources";
+  syncUsageSources = pkgs.writeShellApplication {
+    name = "t3code-sync-usage-limit-sources";
+    runtimeInputs = [
+      pkgs.coreutils
+      pkgs.jq
+    ];
+    text = ''
+      state=${lib.escapeShellArg stateDir}
+      manifest=${lib.escapeShellArg usageSourceManifest}
+      umask 077
+      mkdir -p -- "$state"
+      work=$(mktemp -d -- "$state/.usage-sources.XXXXXX")
+      temporary=
+      trap 'rm -rf -- "$work"; if [[ -n $temporary ]]; then rm -f -- "$temporary"; fi' EXIT
+
+      writeSource() {
+        local id="$1" source="$2" keyFile="$3" optional="$4"
+        if [[ ! $id =~ ${usageSourceIdPattern} ]]; then
+          echo "T3 Code: invalid usage-limit source ID." >&2
+          return 1
+        fi
+        if [[ -z $keyFile ]]; then
+          jq -nc --arg id "$id" --argjson source "$source" '{($id): $source}'
+        elif [[ ! -e $keyFile && $optional == true ]]; then
+          echo "T3 Code: usage-limit source $id: key file is absent; skipping." >&2
+        elif [[ ! -f $keyFile ]] || ! jq -nc --arg id "$id" --argjson source "$source" --rawfile key "$keyFile" '
+          ($key | sub("[\r\n]+$"; "")) as $trimmed |
+          if $trimmed == "" then error("empty key") else {($id): ($source + {managementKey: $trimmed})} end
+        ' 2>/dev/null; then
+          echo "T3 Code: usage-limit source $id: key file is missing, unreadable, or empty." >&2
+          return 1
+        fi
+      }
+
+      {
+        :
+        ${lib.concatStringsSep "\n" (
+          lib.mapAttrsToList (
+            id: source:
+            lib.escapeShellArgs [
+              "writeSource"
+              id
+              (builtins.toJSON (
+                {
+                  inherit (source) kind url;
+                  enabled = source.enable;
+                }
+                // lib.optionalAttrs (source.label != null) { inherit (source) label; }
+                // lib.optionalAttrs (source.managementKey != null) { inherit (source) managementKey; }
+              ))
+              (if source.managementKeyFile == null then "" else source.managementKeyFile)
+              (lib.boolToString source.optional)
+            ]
+          ) cfg.usageLimitSources
+        )}
+      } > "$work/updates"
+
+      previous=/dev/null
+      if [[ -f $manifest ]]; then previous="$manifest"; fi
+      if [[ ! -s $work/updates && $previous == /dev/null ]]; then exit 0; fi
+
+      # Follow writable links like the settings activation does; replace store links.
+      target=$(readlink -m -- "$state/settings.json")
+      if [[ $target == ${builtins.storeDir}/* ]]; then target="$state/settings.json"; fi
+      readSettings() {
+        if [[ -e $target ]]; then ${lib.getExe json5} --as-json "$target" 2>/dev/null; else echo '{}'; fi
+      }
+      temporary=$(mktemp -- "$target.XXXXXX")
+      declared=${lib.escapeShellArg (builtins.toJSON usageSourceIds)}
+      previousIds=$(jq -nc --rawfile ids "$previous" --arg pattern '${usageSourceIdPattern}' \
+        '$ids | split("\n") | map(select(test($pattern)))')
+      if ! readSettings | jq -e --argjson old "$previousIds" --argjson declared "$declared" \
+        --slurpfile updates "$work/updates" '
+          if type != "object" or ((.usageLimitSources // {}) | type != "object")
+          then error("expected settings and usage-limit sources to be objects") else . end |
+          delpaths(($old - $declared) | map(["usageLimitSources", .])) |
+          reduce $updates[] as $source (. ; .usageLimitSources += $source)
+        ' > "$temporary" 2>/dev/null; then
+        echo "T3 Code: could not merge usage-limit sources into $target; leaving it unchanged." >&2
+        exit 1
+      fi
+      jq -nr --argjson old "$previousIds" --argjson declared "$declared" --slurpfile updates "$work/updates" '
+        (($old - ($old - $declared)) + [$updates[] | keys[]]) | unique[]
+      ' > "$work/manifest"
+      chmod 0600 -- "$temporary"
+      mv -fT -- "$temporary" "$target"
+      if [[ -s $work/manifest ]]; then
+        mv -fT -- "$work/manifest" "$manifest"
+      else
+        rm -f -- "$manifest"
+      fi
+    '';
+  };
+
   serverArgs = [
     "serve"
     "--base-dir"
@@ -488,6 +585,73 @@ in
         Whether {file}`settings.json` keeps keys the app wrote. When `false`,
         every activation resets it to exactly the declared settings. The file
         stays a regular file either way, because the server rewrites it.
+      '';
+    };
+
+    usageLimitSources = mkOption {
+      type = types.attrsOf (
+        types.submodule {
+          options = {
+            enable = mkOption {
+              type = types.bool;
+              default = true;
+              description = "Whether T3 Code polls this usage-limit source (the server's `enabled` field).";
+            };
+            kind = mkOption {
+              type = types.enum [ "cliproxy" ];
+              default = "cliproxy";
+              description = "The kind of usage-limit source.";
+            };
+            label = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              description = "Display label for the source. `null` leaves it unset.";
+            };
+            url = mkOption {
+              type = types.str;
+              example = "http://127.0.0.1:8317";
+              description = "Base URL of the usage-limit source.";
+            };
+            managementKeyFile = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              example = "/run/secrets/cliproxy-management-key";
+              description = ''
+                Absolute runtime path outside the Nix store, as a string. The
+                file is read at activation and before the user service starts,
+                with trailing newlines removed. The contents never enter the Nix
+                store. Mutually exclusive with {option}`managementKey`.
+              '';
+            };
+            managementKey = mkOption {
+              type = types.nullOr (types.either types.str types.attrs);
+              default = null;
+              example = {
+                provider = "vault";
+                reference = "proxy/management";
+              };
+              description = ''
+                T3 Code secret-provider reference (`provider` and `reference`)
+                or a non-secret literal. This value is stored in the Nix store;
+                use {option}`managementKeyFile` for actual keys.
+              '';
+            };
+            optional = mkOption {
+              type = types.bool;
+              default = true;
+              description = ''
+                If {option}`managementKeyFile` does not exist, log a notice and
+                leave this source unchanged instead of failing the sync.
+              '';
+            };
+          };
+        }
+      );
+      default = { };
+      description = ''
+        Usage-limit sources in {file}`settings.json`, keyed by IDs matching
+        `${usageSourceIdPattern}`. A removed declaration deletes only the
+        entry previously written by this module.
       '';
     };
 
@@ -850,7 +1014,29 @@ in
           assertion = builtins.length themeIds <= 32;
           message = "programs.t3code.themes: T3 Code reads at most 32 theme files.";
         }
-      ];
+        {
+          assertion = lib.all (id: builtins.match usageSourceIdPattern id != null) usageSourceIds;
+          message = "programs.t3code.usageLimitSources: ids must match ${usageSourceIdPattern}.";
+        }
+      ]
+      ++ lib.concatLists (
+        lib.mapAttrsToList (id: source: [
+          {
+            assertion = source.managementKey == null || source.managementKeyFile == null;
+            message = "programs.t3code.usageLimitSources.${id}: managementKey and managementKeyFile are mutually exclusive.";
+          }
+          {
+            assertion =
+              source.managementKeyFile == null
+              || (
+                !builtins.hasContext source.managementKeyFile
+                && lib.hasPrefix "/" source.managementKeyFile
+                && !(lib.hasPrefix "${builtins.storeDir}/" source.managementKeyFile)
+              );
+            message = "programs.t3code.usageLimitSources.${id}.managementKeyFile must be an absolute runtime path outside the Nix store.";
+          }
+        ]) cfg.usageLimitSources
+      );
 
       home.packages =
         lib.optional (cfg.package != null) (
@@ -886,14 +1072,13 @@ in
           fi
           if [[ $replace == 1 || ! -e $target ]]; then
             dynamic="$empty"
-          elif ! dynamic="$(${lib.getExe json5} --as-json "$target")"; then
+          elif ! dynamic="$(${lib.getExe json5} --as-json "$target" 2>/dev/null)"; then
             errorEcho "T3 Code: $target is not valid JSON; leaving it unchanged."
             return 1
           fi
-          if ! result="$(${lib.getExe pkgs.jq} -n "$operation" \
-            --argjson dynamic "$dynamic" \
+          if ! result="$(${lib.getExe pkgs.jq} ". as \$dynamic | $operation" \
             --argjson static "$(< "$static")" \
-            --argjson defaults "$(< "$defaults")")"; then
+            --argjson defaults "$(< "$defaults")" <<< "$dynamic" 2>/dev/null)"; then
             errorEcho "T3 Code: could not merge settings into $target; leaving it unchanged."
             return 1
           fi
@@ -909,6 +1094,16 @@ in
         }
 
         ${lib.concatMapStringsSep "\n" mergeFile managedFiles}
+
+        if ${
+          lib.boolToString (usageSourceIds != [ ])
+        } || [[ -f ${lib.escapeShellArg usageSourceManifest} ]]; then
+          if [[ -v DRY_RUN ]]; then
+            verboseEcho "T3 Code: would sync usage-limit sources"
+          else
+            ${lib.getExe syncUsageSources}
+          fi
+        fi
 
         t3codeThemes() {
           local dir=${lib.escapeShellArg "${stateDir}/themes"} manifest id
@@ -998,6 +1193,11 @@ in
           Environment =
             lib.mapAttrsToList (name: value: "${name}=${value}") cfg.server.environment
             ++ lib.toList (cfg.server.serviceConfig.Environment or [ ]);
+        }
+        // lib.optionalAttrs (usageSourceIds != [ ]) {
+          ExecStartPre = lib.toList (cfg.server.serviceConfig.ExecStartPre or [ ]) ++ [
+            (lib.getExe syncUsageSources)
+          ];
         };
 
         Install.WantedBy = [ "default.target" ];

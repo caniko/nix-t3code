@@ -58,6 +58,9 @@ finer control than Home Manager's built-in `programs.t3code`, which it replaces
   recognizes hosts it does not know by name, such as `codefloe.com`, only
   through such a CLI login.
 - **Service tuning.** `server.{host,port,extraArgs,path,environment,environmentFile,serviceConfig}`.
+- **Usage limits.** `usageLimitSources.<id>` configures CLIProxyAPI sources
+  for the usage-limit display. Keys can come from a runtime file or a T3 Code
+  secret-provider reference.
 - **Linked environments.** `linkedEnvironments.<name>` links this environment
   to another machine's T3 Code server, at its https `urls` or else through an
   SSH tunnel to a loopback port. `sshHost` takes one destination or a list of
@@ -78,6 +81,34 @@ finer control than Home Manager's built-in `programs.t3code`, which it replaces
   errors in the files the agent edited.
 
 The server unit is Linux-only.
+
+## Usage-limit sources
+
+```nix
+programs.t3code.usageLimitSources.local-proxy = {
+  label = "Local CLIProxyAPI";
+  url = "http://127.0.0.1:8317";
+  managementKeyFile = "/run/secrets/cliproxy-management-key";
+};
+```
+
+Use an absolute runtime path string readable by the Home Manager user, not a
+Nix path literal or `builtins.readFile`. Activation and `t3code.service`
+pre-start read the file, trim trailing newlines, and write `settings.json` with
+mode `0600`. The key stays out of the Nix store. If the file has not been
+created yet, `optional = true` (the default) leaves that source unchanged;
+set `optional = false` to require it.
+
+Alternatively, set `managementKey = { provider = "vault"; reference = "proxy/management"; };`
+instead of `managementKeyFile`. `managementKey` itself enters the Nix store:
+use it only for a reference or a non-secret literal.
+
+IDs must match `^[A-Za-z0-9][A-Za-z0-9._-]*$`. `kind` defaults to `"cliproxy"`,
+`label` is optional, and `enable = false` keeps the source configured without
+polling it. Removing a declaration removes the entry this module wrote without
+removing sources created in the app, unless `mutableUserSettings = false`
+resets the whole settings file. Use `systemd.user.services.t3code.Unit` to add
+`Wants` and `After` for a proxy user service if needed.
 
 ## Shared server (NixOS)
 
