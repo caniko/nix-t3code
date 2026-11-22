@@ -17,8 +17,6 @@ let
   jsonFormat = pkgs.formats.json { };
   json5 = pkgs.python3Packages.toPythonApplication pkgs.python3Packages.json5;
   inherit (cfg) stateDir;
-  # T3 Code's private GEMINI_HOME for the `antigravity` instance (antigravityAuthSupport.ts).
-  antigravityConfigDir = "${stateDir}/providers/antigravity/${builtins.hashString "sha256" "antigravity"}/config";
 
   forgeKinds = [
     "github"
@@ -799,16 +797,27 @@ in
       '';
     };
 
+    antigravityConfigDir = mkOption {
+      type = types.str;
+      readOnly = true;
+      # T3 Code derives GEMINI_HOME from the instance ID (antigravityAuthSupport.ts).
+      default = "${stateDir}/providers/antigravity/${builtins.hashString "sha256" "antigravity"}/config";
+      defaultText = lib.literalMD "Derived from {option}`programs.t3code.stateDir`.";
+      description = ''
+        The config directory inside the private {env}`GEMINI_HOME` T3 Code
+        gives the `antigravity` provider instance. External modules can use
+        this directory to locate the instance's {file}`mcp_config.json`.
+      '';
+    };
+
     antigravityHooks = mkOption {
       type = types.nullOr types.path;
       default = null;
       example = literalExpression "config.programs.harborLlm.lsp.antigravityHooks";
       description = ''
-        A `hooks.json` for the `antigravity` provider instance, installed as
-        {file}`config/hooks.json` in the private `GEMINI_HOME` T3 Code gives
-        it ({file}`providers/antigravity/<sha256 of the instance id>` in
-        {option}`programs.t3code.stateDir`). Setting it back to `null` removes
-        the file this module installed.
+        A {file}`hooks.json` for the `antigravity` provider instance, installed
+        in {option}`programs.t3code.antigravityConfigDir`. Setting it back to
+        `null` removes the file this module installed.
       '';
     };
 
@@ -1134,7 +1143,7 @@ in
         fi
 
         t3codeAntigravityHooks() {
-          local dir=${lib.escapeShellArg antigravityConfigDir}
+          local dir=${lib.escapeShellArg cfg.antigravityConfigDir}
           local source=${
             lib.escapeShellArg (lib.optionalString (cfg.antigravityHooks != null) "${cfg.antigravityHooks}")
           }
