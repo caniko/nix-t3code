@@ -93,6 +93,7 @@ let
 
   fakeAgy = pkgs.writeShellScriptBin "agy_acp_server.par" "";
   agyHooks = pkgs.writeText "hooks.json" ''{"lsp":{"PreToolUse":[]}}'';
+  agyConfigSuffix = "userdata/providers/antigravity/${builtins.hashString "sha256" "antigravity"}/config";
   first = configuration {
     programs.t3code.antigravityPackage = fakeAgy;
     programs.t3code.antigravityHooks = agyHooks;
@@ -240,6 +241,16 @@ assert lib.assertMsg (
 assert lib.assertMsg (
   !(builtins.tryEval usageBadId).success
 ) "invalid usage-limit IDs must fail Home Manager assertions";
+assert lib.assertMsg (
+  first.programs.t3code.antigravityConfigDir == "${home}/.t3/${agyConfigSuffix}"
+  && usage.programs.t3code.antigravityConfigDir == "/build/home/.t3/${agyConfigSuffix}"
+) "antigravityConfigDir must resolve under the configured T3 home";
+assert lib.assertMsg (
+  !(builtins.tryEval
+    (configuration { programs.t3code.antigravityConfigDir = "/override"; })
+    .programs.t3code.antigravityConfigDir
+  ).success
+) "antigravityConfigDir must be read-only";
 assert lib.assertMsg
   (lib.hasSuffix "-t3code-tunnel 127.0.0.1:37741:127.0.0.1:3774 tester@lan tester@peer" tunnel)
   "tunnel unit missing";
@@ -403,7 +414,7 @@ assert lib.assertMsg (lib.any (
         jq -e '.linkedEnvironmentsEnabled' "$s"
         jq -e '.providerInstances.antigravity == {"driver": "antigravity", "config": {"binaryPath": "${lib.getExe fakeAgy}"}}' "$s"
         [[ $(stat -c %a "$s") == 600 ]]
-        hooks="$state/providers/antigravity/${builtins.hashString "sha256" "antigravity"}/config/hooks.json"
+        hooks="$root${lib.removePrefix home first.programs.t3code.antigravityConfigDir}/hooks.json"
         cmp "$hooks" ${agyHooks}
         [[ ! -L $hooks && $(stat -c %a "$hooks" "''${hooks%/config/hooks.json}") == $'600\n700' ]]
         jq -e '. == {"fontSizeCode": 15, "timestampFormat": "24-hour"}' "$state/client-settings.json"
