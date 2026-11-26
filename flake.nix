@@ -29,6 +29,9 @@
       };
 
       nixosModules.t3codeServer = ./modules/server.nix;
+      nixosModules.t3codeBackup = ./modules/backup.nix;
+
+      lib.mkT3CodeNightly = import ./pkgs/mk-t3code-nightly.nix;
 
       checks = forAllSystems (
         pkgs:
@@ -36,6 +39,18 @@
           inherit pkgs home-manager;
           module = self.homeManagerModules.t3code;
           serverModule = self.nixosModules.t3codeServer;
+        }
+        // {
+          backup = import ./tests/backup.nix {
+            inherit pkgs;
+            module = self.nixosModules.t3codeBackup;
+          };
+        }
+        // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
+          nightly = import ./tests/nightly.nix {
+            inherit pkgs;
+            inherit (self.lib) mkT3CodeNightly;
+          };
         }
       );
 

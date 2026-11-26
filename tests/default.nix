@@ -165,13 +165,15 @@ let
 
   # The shared system server: unit names and paths are a contract with the T3
   # CLI and with modules that extend the units by name.
-  system =
+  systemWith =
+    extra:
     (import (pkgs.path + "/nixos/lib/eval-config.nix") {
       system = null;
       modules = [
         serverModule
         {
           nixpkgs.pkgs = pkgs;
+          system.stateVersion = "26.11";
           users.users.alice = {
             isNormalUser = true;
             home = "/home/alice";
@@ -200,8 +202,28 @@ let
             operators = [ "alice" ];
           };
         }
+        extra
       ];
     }).config;
+  system = systemWith { };
+  policy = pkgs.writeText "t3code-policy.json" ''{"schemaVersion":1}'';
+  sudoEnv = pkgs.writeText "t3code-sudo-env" ''
+    T3CODE_HOME=/var/lib/t3code
+    T3CODE_LOG_LEVEL="Debug"
+    T3CODE_TEST="two words = 'quoted' "
+  '';
+  managed = systemWith {
+    users.groups.t3code-tools = { };
+    services.t3code = {
+      policyFile = policy;
+      backupGroup = "t3code-backup";
+      extraGroups = [ "t3code-tools" ];
+      sudoExtraEnv = {
+        T3CODE_LOG_LEVEL = "Debug";
+        T3CODE_TEST = "two words = 'quoted' ";
+      };
+    };
+  };
   systemServer = system.systemd.services.t3code;
   runner = system.systemd.services."t3-runner@alice";
 
@@ -316,6 +338,30 @@ assert lib.assertMsg (
 assert lib.assertMsg (lib.any (
   rule: rule.runAs == "t3code" && rule.users == [ "alice" ]
 ) system.security.sudo.extraRules) "operator sudo rule";
+assert lib.assertMsg (
+  !(system.environment.etc ? "t3code/policy.json")
+  && systemServer.restartTriggers == [ ]
+  && system.users.users.t3code.extraGroups == [ ]
+  && !(lib.any (lib.hasInfix "/var/lib/t3code/backup") system.systemd.tmpfiles.rules)
+) "policy and backup access must be opt-in";
+assert lib.assertMsg (
+  toString managed.environment.etc."t3code/policy.json".source == toString policy
+  && map toString managed.systemd.services.t3code.restartTriggers == [ (toString policy) ]
+  && lib.hasInfix (builtins.unsafeDiscardStringContext "env_file=${sudoEnv}") managed.security.sudo.extraConfig
+  && managed.users.groups ? t3code-backup
+  && lib.all (group: builtins.elem group managed.users.users.t3code.extraGroups) [
+    "t3code-tools"
+    "t3code-backup"
+  ]
+  && builtins.elem "d /var/lib/t3code/backup 2750 t3code t3code-backup -" managed.systemd.tmpfiles.rules
+  && builtins.elem "d /var/lib/t3code/userdata 0750 t3code t3code -" managed.systemd.tmpfiles.rules
+) "configured policy, sudo environment and snapshot-only backup access must reach NixOS";
+assert lib.assertMsg (
+  !(builtins.tryEval
+    (systemWith { services.t3code.sudoExtraEnv.EXTRA = "value\nOTHER=unexpected"; })
+    .security.sudo.extraConfig
+  ).success
+) "sudo env values must not inject another assignment";
 {
   usage-limit-sources =
     pkgs.runCommand "t3code-usage-limit-sources-test" { nativeBuildInputs = [ pkgs.jq ]; }
