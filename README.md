@@ -142,6 +142,55 @@ a server while agents, terminals and Git run as the thread's owner.
 The package must provide `t3 runner`. State is `/var/lib/t3code`; operators
 administer it with `sudo -u t3code /etc/t3code/t3 ...`.
 
+- `policyFile`: non-secret policy JSON installed at `/etc/t3code/policy.json`.
+  Use a store-backed file (for example, `pkgs.writeText`); changes restart
+  the server. The T3 Code package must support the policy format.
+- `backupGroup`: optional group with access to `/var/lib/t3code/backup`, not
+  to live userdata. Set `users.groups.<group>.members` for readers and have
+  the snapshot command write group-readable files.
+- `extraGroups`: additional existing groups for the server user.
+- `sudoExtraEnv`: non-secret settings for operator commands run as `t3code`,
+  in addition to the module's fixed `T3CODE_HOME`. It does not change the
+  server or runner environment.
+
+## Scheduled backups (NixOS)
+
+```nix
+{
+  imports = [ inputs.nix-t3code.nixosModules.t3codeBackup ];
+
+  services.t3codeBackup.jobs.history = {
+    onCalendar = "daily";
+    user = "backup";
+    execStart = "${backupPackage}/bin/backup-t3code";
+  };
+}
+```
+
+The job runs as the existing `backup` user and gets a private
+`$STATE_DIRECTORY` (`/var/lib/t3code-backup-history` in this example). The
+timer catches missed runs and adds up to 15 minutes of delay by default.
+The command handles the backup itself, including what to copy and how long
+to keep it. Use `group`, `environment`, `randomizedDelaySec` or
+`serviceConfig` to adjust a job.
+
+## Nightly binaries (x86_64 Linux)
+
+```nix
+inputs.nix-t3code.lib.mkT3CodeNightly {
+  inherit pkgs;
+  manifest = builtins.fromJSON (builtins.readFile ./manifest.json);
+  runtimePackages = [ pkgs.git ]; # optional
+}
+```
+
+Supply a manifest with `version` and `assets.cli` / `assets.desktop`, each
+with a `url` and either an SRI `hash` or a hex `sha256`. The CLI asset must
+be the glibc x64 `.tar.gz` release and the desktop asset the x86_64
+AppImage. The package provides `t3` and `t3code-desktop`; `cliUnwrapped` and
+`desktopPackage` are also available separately. No providers or state path
+overrides are enabled by default.
+
 ## Checks
 
 ```console

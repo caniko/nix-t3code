@@ -18,6 +18,23 @@ let
   user = "t3code";
   stateDir = "/var/lib/t3code";
   runnerUnits = map (name: "t3-runner@${name}") (builtins.attrNames cfg.runners);
+  sudoEnv = pkgs.writeText "t3code-sudo-env" (
+    "T3CODE_HOME=${stateDir}\n"
+    + lib.concatStrings (
+      lib.mapAttrsToList (
+        name: value:
+        assert lib.assertMsg
+          (
+            name != "T3CODE_HOME"
+            && builtins.match "[A-Za-z_][A-Za-z0-9_]*" name != null
+            && builtins.match "[^#[:cntrl:]]*" value != null
+          )
+          "services.t3code.sudoExtraEnv needs valid variable names (other than T3CODE_HOME) and values without # or control characters";
+        # sudo strips the outer quotes and does not expand the value.
+        "${name}=\"${value}\"\n"
+      ) cfg.sudoExtraEnv
+    )
+  );
 
   oidcModule.options = {
     issuer = mkOption {
@@ -116,6 +133,44 @@ in
       '';
     };
 
+    policyFile = mkOption {
+      type = types.nullOr types.pathInStore;
+      default = null;
+      description = ''
+        Non-secret policy JSON from the Nix store, installed at
+        {file}`/etc/t3code/policy.json`. Changing it restarts the server.
+      '';
+    };
+
+    backupGroup = mkOption {
+      type = types.nullOr (types.strMatching "[A-Za-z_][A-Za-z0-9_.-]*");
+      default = null;
+      example = "t3code-backup";
+      description = ''
+        Group allowed to list and traverse {file}`/var/lib/t3code/backup`.
+        The module creates the group and adds `t3code` to it. Snapshot
+        writers must make files group-readable; new files inherit the
+        directory's group. Live userdata permissions do not change.
+      '';
+    };
+
+    extraGroups = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      description = "Additional existing groups for the `t3code` system user.";
+    };
+
+    sudoExtraEnv = mkOption {
+      type = types.attrsOf types.str;
+      default = { };
+      example.T3CODE_LOG_LEVEL = "Debug";
+      description = ''
+        Additional non-secret variables for sudo commands run as `t3code`.
+        Values may not contain `#` or control characters. `T3CODE_HOME` is
+        set by the module and cannot be overridden here.
+      '';
+    };
+
     oidc = mkOption {
       type = types.nullOr (types.submodule oidcModule);
       default = null;
@@ -149,13 +204,24 @@ in
       isSystemUser = true;
       group = user;
       home = stateDir;
+      extraGroups = cfg.extraGroups ++ lib.optional (cfg.backupGroup != null) cfg.backupGroup;
     };
-    users.groups.${user} = { };
+    users.groups = {
+      ${user} = { };
+    }
+    // lib.optionalAttrs (cfg.backupGroup != null) {
+      ${cfg.backupGroup} = { };
+    };
 
     # sudo injects T3CODE_HOME itself (env_file for runas t3code), so the rule
     # needs no SETENV and takes no caller-controlled environment.
-    environment.etc."t3code/t3".source = t3;
-    security.sudo.extraConfig = "Defaults>${user} env_file=${pkgs.writeText "t3code-sudo-env" "T3CODE_HOME=${stateDir}\n"}";
+    environment.etc = {
+      "t3code/t3".source = t3;
+      "t3code/policy.json" = lib.mkIf (cfg.policyFile != null) {
+        source = "${cfg.policyFile}";
+      };
+    };
+    security.sudo.extraConfig = "Defaults>${user} env_file=${sudoEnv}";
     security.sudo.extraRules = lib.optional (cfg.operators != [ ]) {
       users = cfg.operators;
       runAs = user;
@@ -171,6 +237,7 @@ in
       "d /run/t3code 0750 root ${user} -"
       "d ${stateDir}/userdata 0750 ${user} ${user} -"
     ]
+    ++ lib.optional (cfg.backupGroup != null) "d ${stateDir}/backup 2750 ${user} ${cfg.backupGroup} -"
     ++
       lib.optional (cfg.initialSettings != { })
         "C ${stateDir}/userdata/settings.json 0640 ${user} ${user} - ${pkgs.writeText "t3code-settings.json" (builtins.toJSON cfg.initialSettings)}"
@@ -181,6 +248,7 @@ in
     systemd.services = {
       t3code = {
         description = "T3 Code server";
+        restartTriggers = lib.optional (cfg.policyFile != null) "${cfg.policyFile}";
         wantedBy = [ "multi-user.target" ];
         after = [ "network-online.target" ];
         wants = [ "network-online.target" ];
